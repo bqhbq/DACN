@@ -21,7 +21,7 @@ Classical centralised ATSC systems require raw traffic data to be transmitted to
 │   • Manages global communication rounds                     │
 │   • Handles client selection & stragglers                   │
 └────────────────┬──────────────────────────────┬─────────────┘
-                 │  Global model weights (↓)     │
+                 │  Global model weights (↓)    │
                  │  Local gradients / Δw  (↑)   │
      ┌───────────▼───────────┐       ┌───────────▼───────────┐
      │   Intersection A      │  ...  │   Intersection N      │
