@@ -47,37 +47,46 @@ $$\dim(s_i^{\text{local}}) = 4 + 1 + 28 + 28 + 28 = 89$$
 > **Implementation hiện tại** (Phase 1 — simplified): Dùng 3 đặc trưng mỗi làn (queue, speed, density), bỏ qua elapsed time và approach flow.
 > $$\dim(s_i^{\text{local}}) = 28 \times 3 = 84$$
 
-### 2.2 Neighboring State — $s_i^{\text{neighbor}}$
+### 2.2 Trạng thái lân cận (Neighboring State — $s_i^{\text{neighbor}}$)
 
-Để Agent $i$ có "tầm nhìn toàn cục" và phòng chống **Queue Spillback** (ùn tắc lan truyền từ giao lộ này sang giao lộ khác), agent nhận **embedding** từ các giao lộ lân cận:
+Để Agent $i$ có "tầm nhìn toàn cục" và phòng chống Queue Spillback (ùn tắc lan truyền từ giao lộ này sang giao lộ khác) mà không vi phạm tính bảo mật của Federated Learning, Agent sẽ nhận các vector đặc trưng (embedding) thay vì dữ liệu thô từ các giao lộ lân cận:
 
-$$s_i^{\text{neighbor}} = \text{Aggregate}\left( \left\\{ e_j^t \mid j \in \mathcal{N}(i) \right\\} \right)$$
+$$s_i^{\text{neighbor}} = \text{Aggregate}\left( \left\lbrace e_j^t \mid j \in \mathcal{N}(i) \right\rbrace \right)$$
 
-Trong đó:
-- $\mathcal{N}(i)$: Tập giao lộ kề cận (chia sẻ làn đường trực tiếp)
-- $e_j^t = \text{Backbone}(s_j^{\text{local}})$: Embedding từ `shared_feature_extractor` của agent $j$
-- $\text{Aggregate}(\cdot)$: Hàm tổng hợp — Mean-pooling hoặc Attention
+**Trong đó:**
+- $\mathcal{N}(i)$: Tập các giao lộ kề cận (chia sẻ làn đường trực tiếp với giao lộ $i$).
+- $e_j^t = \text{Backbone}(s_j^{\text{local}})$: Vector đặc trưng (Embedding) được trích xuất từ phần `shared_feature_extractor` của Agent $j$.
+- $\text{Aggregate}(\cdot)$: Hàm tổng hợp thông tin, có thể sử dụng Mean-pooling (lấy trung bình) hoặc Attention Mechanism (đánh trọng số theo mức độ kẹt xe của từng hướng).
 
-> **Phase 1 — Chưa triển khai**: `s_i^{\text{neighbor}}` được đặt bằng vector 0 hoặc bỏ qua. Sẽ triển khai ở Phase 2.
+---
 
-### 2.3 Tóm tắt State Vector
+> **Phase 1 — Chưa triển khai**: $s_i^{\text{neighbor}}$ được đặt bằng vector 0 hoặc bỏ qua. Sẽ triển khai ở Phase 2.
 
-```
-s_i^t = [
-    # Local (84 dims — Phase 1)
-    queue_norm[0..27],       # 28 dims — chiều dài hàng đợi mỗi làn
-    speed_norm[0..27],       # 28 dims — tốc độ TB mỗi làn
-    density_norm[0..27],     # 28 dims — mật độ mỗi làn
 
-    # Neighbor (Phase 2 — TBD)
-    # neighbor_embedding[0..63]  # 64 dims — backbone output của giao lộ lân cận
-]
-```
+### 2.3 Tóm tắt State Vector ($s_i^t$)
 
-**Giá trị chuẩn hoá**: Mọi feature trong $[0, 1]$ bằng min-max scaling với ngưỡng:
-- $Q_{\max} = 50$ xe/làn
-- $v_{\max} = 16.67$ m/s (~60 km/h)
-- $\rho_{\max} = 50$ xe/làn
+Vector trạng thái tổng hợp của Agent $i$ tại bước thời gian $t$ bao gồm 3 nhóm thông tin chính. Kích thước (dimension) của vector không bị hardcode mà phụ thuộc linh hoạt vào số lượng pha đèn (`num_phases`) và số làn đường đầu vào (`num_lanes`) đọc từ cấu hình `roadnet.json` của CityFlow.
+
+$$s_i^t = [ \text{Phase Info}, \text{Traffic Info}, \text{Neighbor Info} ]$$
+
+**1. Thông tin pha đèn (Phase Info):** *— Bắt buộc để Agent biết trạng thái hiện hành*
+- `current_phase [0 .. num_phases - 1]`: Mã hóa One-hot của pha đèn đang bật (VD: Ngã tư 4 pha thì vector có 4 chiều, đang bật pha 1 sẽ là `[1, 0, 0, 0]`).
+- `elapsed_time [1 dim]`: Thời gian pha đèn hiện tại đã duy trì, được chuẩn hóa (Công thức: $t_{\text{elapsed}} / t_{\text{min\_green}}$ hoặc chia cho max_green).
+
+**2. Thông tin giao thông cục bộ (Traffic Info):** *— Dữ liệu thô từ CityFlow*
+- `queue_norm [0 .. num_lanes - 1]`: Chiều dài hàng đợi mỗi làn đầu vào.
+- `speed_norm [0 .. num_lanes - 1]`: Tốc độ trung bình mỗi làn đầu vào.
+- `density_norm [0 .. num_lanes - 1]`: Mật độ phương tiện mỗi làn đầu vào.
+*(Ví dụ: Một ngã tư tiêu chuẩn 4 hướng, mỗi hướng 3 làn tiến vào sẽ có `num_lanes` = 12. Suy ra nhóm Traffic Info này chiếm $12 \times 3 = 36$ dims).*
+
+**3. Thông tin lân cận (Neighbor Info):** *— Tính năng Phase 2*
+- `neighbor_embedding [0 .. 63]`: Vector 64 dims chứa thông tin tổng hợp từ đầu ra backbone của các nút giao kề cận.
+
+**Quy tắc chuẩn hoá (Min-Max Scaling):**
+Mọi feature số thực đều phải được scale về miền $[0, 1]$ trước khi đưa vào mạng Nơ-ron bằng các ngưỡng vật lý sau:
+- $Q_{\max} = 50$ (xe/làn): Sức chứa tối đa ước tính của một làn chờ dài trung bình.
+- $v_{\max} = 16.67$ (m/s): Tốc độ giới hạn chuẩn đô thị (~60 km/h).
+- $\rho_{\max} = 50$ (xe/làn): Mật độ tối đa tương đương $Q_{\max}$.
 
 ---
 
