@@ -1,3 +1,7 @@
 # federated/
-# Federated Learning server and client logic built on the Flower (flwr) framework.
-# Includes aggregation strategies (FedAvg, FedProx) and client selection utilities.
+# Lớp FederatedServer và các thuật toán tổng hợp FL.
+#
+# Module chính:
+#   server.py — FederatedServer: FedAvg, FedProx, Clustering
+
+from federated.server import FederatedServer
