@@ -52,7 +52,6 @@ $$\dim(s_i^{\text{local}}) = 4 + 1 + 28 + 28 + 28 = 89$$
 Để Agent $i$ có "tầm nhìn toàn cục" và phòng chống **Queue Spillback** (ùn tắc lan truyền từ giao lộ này sang giao lộ khác), agent nhận **embedding** từ các giao lộ lân cận:
 
 $$s_i^{\text{neighbor}} = \text{Aggregate}\left(\left\{ e_j^t \mid j \in \mathcal{N}(i) \right\}\right)$$
-
 Trong đó:
 - $\mathcal{N}(i)$: Tập giao lộ kề cận (chia sẻ làn đường trực tiếp)
 - $e_j^t = \text{Backbone}(s_j^{\text{local}})$: Embedding từ `shared_feature_extractor` của agent $j$
