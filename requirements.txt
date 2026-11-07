@@ -1,0 +1,18 @@
+# Core ML / Deep Learning
+torch>=2.2.0
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+
+# Visualization
+matplotlib>=3.8.0
+
+# Federated Learning
+flwr>=1.8.0
+
+# Experiment Tracking
+wandb>=0.17.0
+
+# Development Environment
+jupyterlab>=4.1.0
+ipywidgets>=8.1.0

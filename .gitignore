@@ -1,0 +1,88 @@
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+.installed.cfg
+lib/
+lib64/
+.Python
+
+# Virtual Environments
+.env
+.venv
+env/bin/
+env/lib/
+env/include/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ============================================================
+# Jupyter / IPython
+# ============================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ============================================================
+# PyTorch / ML Artifacts
+# ============================================================
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+runs/
+lightning_logs/
+
+# ============================================================
+# Experiment Tracking
+# ============================================================
+wandb/
+mlruns/
+.neptune/
+
+# ============================================================
+# Data (populated separately by simulation team)
+# ============================================================
+data/
+
+# ============================================================
+# OS / IDE
+# ============================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ============================================================
+# Logs & Temporary Files
+# ============================================================
+*.log
+*.tmp
+*.bak
+logs/
+tmp/
