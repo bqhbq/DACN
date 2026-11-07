@@ -1,9 +1,6 @@
 # AGENTS.md — System Context & Guidelines for AI Coding Agents
 # FedMARL-ATSC · Federated Multi-Agent RL for Adaptive Traffic Signal Control
 
-> **Dành cho**: GitHub Copilot, Cursor, Windsurf, Gemini, và mọi AI Coding Agent làm việc trong repo này.
-> **Yêu cầu**: Đọc file này VÀ `docs/MDP_SPEC.md` trước bất kỳ tác vụ viết code nào.
-
 ---
 
 ## 1. Project Context
