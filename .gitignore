@@ -86,3 +86,8 @@ Thumbs.db
 *.bak
 logs/
 tmp/
+.temp/
+
+AGENTS.md
+
+
