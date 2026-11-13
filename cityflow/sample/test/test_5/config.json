@@ -1,0 +1,12 @@
+{
+  "interval": 1.0,
+  "seed": 42,
+  "dir": "A:/Users/Workspace/_Project/DACN/cityflow/sample/test/test_5/",
+  "roadnetFile": "roadnet.json",
+  "flowFile": "temp_flow.json",
+  "rlTrafficLight": false,
+  "laneChange": true,
+  "saveReplay": true,
+  "roadnetLogFile": "render/replay_roadnet.json",
+  "replayLogFile": "render/replay.txt"
+}
