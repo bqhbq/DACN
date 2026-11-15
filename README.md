@@ -212,7 +212,7 @@ Muốn đổi kích thước lưới, số làn hoặc thư mục output thì s�
 
 ## Demo FL và Giao diện Replay
 
-Script [`main_demo_fl.py`](main_demo_fl.py) chạy một buổi demo đầy đủ: CityFlow mô phỏng giao thông, mỗi giao lộ có một `NodeAgent` điều khiển đèn, và `FederatedServer` định kỳ tổng hợp backbone. Kết quả mô phỏng được ghi thành replay để xem lại trên trình duyệt.
+Script [`main_fedmarl.py`](main_fedmarl.py) chạy một buổi demo đầy đủ: CityFlow mô phỏng giao thông, mỗi giao lộ có một `NodeAgent` điều khiển đèn, và `FederatedServer` định kỳ tổng hợp backbone. Kết quả mô phỏng được ghi thành replay để xem lại trên trình duyệt.
 
 Mỗi node huấn luyện cục bộ theo một trong hai chế độ, chọn bằng `--trainer`:
 
@@ -229,13 +229,13 @@ Với Docker (xem [`cityflow/cityflow.md`](cityflow/cityflow.md)), chạy từ t
 
 ```bash
 docker compose up -d
-docker compose exec cityflow python main_demo_fl.py
+docker compose exec cityflow python main_fedmarl.py
 ```
 
 Nếu CityFlow đã cài trực tiếp trên máy, chạy từ thư mục gốc repo:
 
 ```bash
-python main_demo_fl.py
+python main_fedmarl.py
 ```
 
 Tham số tuỳ chọn:

@@ -29,6 +29,7 @@ env/lib/
 env/include/
 venv/
 ENV/
+!/env/
 env.bak/
 venv.bak/
 

@@ -19,13 +19,13 @@ Nếu file này mâu thuẫn với các tài liệu trên về **môi trường 
 - Hệ thống **điều khiển tín hiệu giao thông thích ứng (ATSC)** phân tán: mỗi giao lộ là một `NodeAgent` học tăng cường, phối hợp với nhau qua **Federated Learning** (cơ chế RL-FedMARL).
 - Mô phỏng bằng **CityFlow** (engine C++ có Python binding).
 - Bài toán nghiên cứu trọng tâm: **Negative Transfer** giữa các giao lộ không đồng nhất. Hướng giải quyết: personalisation (giữ policy head tại node), clustering và selective collaboration ở server.
-- Điểm vào demo: `python main_demo_fl.py` (xem docstring đầu file cho các tuỳ chọn `--trainer`, `--steps`, `--fl-interval`).
+- Điểm vào demo CityFlow: `python main_fedmarl.py` (xem docstring đầu file cho `--trainer`, `--steps`, `--fl-interval`, `--no-fl`, `--fedprox-mu`). Thí nghiệm nhanh không cần CityFlow: `python train_fedmarl.py` (xem `docs/RL_INTEGRATION_GUIDE.md`).
 
 **Trạng thái code hiện tại** (kiểm tra lại trước khi dựa vào):
 
-- Đã có: `agents/` (`node_agent.py`, `networks.py`, `dqn.py`, `replay_buffer.py`), `federated/server.py`, `main_demo_fl.py`.
-- Chưa có: thư mục `env/` và lớp `TrafficEnv`. Trong demo, ràng buộc an toàn (pha vàng, xanh tối thiểu) đang do `SignalController` trong `main_demo_fl.py` đảm nhiệm.
-- Chưa có: thư mục `tests/`, cấu hình linter/formatter, CI. Bản đồ mã nguồn ở §6, lệnh chạy ở §7, các chỗ code còn lệch quy tắc ở §8.
+- Đã có: `agents/` (`node_agent.py`, `networks.py`, `q_learning.py`, `dqn.py`, `behavior_cloning.py`, `llm_expert.py`, `replay_buffer.py`, `baselines/`), `federated/server.py`, `main_fedmarl.py`, `env/` (`MockTrafficEnv`, `PhaseSafetyController`, `obs_layout.py`), `train_fedmarl.py`, `tests/`.
+- Chưa có: lớp `TrafficEnv` bọc CityFlow. Trong demo CityFlow, ràng buộc an toàn (pha vàng, xanh tối thiểu) do `SignalController` trong `main_fedmarl.py` đảm nhiệm; `env/safety.py` là bản đầy đủ hơn (C-01…C-05) dùng cho `MockTrafficEnv`.
+- Chưa có: cấu hình linter/formatter, CI. Bản đồ mã nguồn ở §6, lệnh chạy ở §7, các chỗ code còn lệch quy tắc ở §8.
 
 ---
 
@@ -134,12 +134,16 @@ Mọi lời gọi ra ngoài tiến trình Python thuần đều phải được 
 ## 6. Codebase Map
 
 ```
-main_demo_fl.py          Điểm vào demo: sinh kịch bản → vòng mô phỏng → vòng FL → ghi log cho frontend
+main_fedmarl.py         Điểm vào demo CityFlow: sinh kịch bản → vòng mô phỏng → vòng FL → log + KPI (main_demo_fedmarl.py là bản sao y hệt)
+train_fedmarl.py         Thí nghiệm so sánh trên MockTrafficEnv (independent / fedavg / fedprox / baselines) → results/*.csv
+env/                     MockTrafficEnv, PhaseSafetyController (C-01…C-05), obs_layout.py (hợp đồng bố cục state) — không import torch
+tests/                   pytest: kiến trúc Decoupled, an toàn, DQN+FL, bản port CityFlow (engine giả)
 agents/
   networks.py            TrafficAgentNet (backbone + head; value head tuỳ chọn qua with_value)
-  node_agent.py          NodeAgent: chọn action, 2 kiểu học cục bộ, client LLM, get/set_shared_weights
-  dqn.py                 DQNTrainer bọc quanh NodeAgent (target net, replay, ε giảm dần) — demo CHƯA dùng
-  replay_buffer.py       ReplayBuffer cho DQNTrainer
+  node_agent.py          NodeAgent trung lập thuật toán: giao diện RL + giao diện FL (extract/load_global_weights), FedProx, hook sau FL
+  q_learning.py, dqn.py, behavior_cloning.py   Mỗi thuật toán là một lớp con của NodeAgent (llm_expert.py: client LLM)
+  replay_buffer.py       Transition, TransitionBatch, ReplayBuffer
+  baselines/             fixed_time.py, actuated.py (greedy longest-queue)
 federated/server.py      FederatedServer: aggregate / broadcast / cluster_clients / run_round
 cityflow/
   Dockerfile, docker-compose.yml   Môi trường chạy (service `cityflow`)
@@ -148,27 +152,28 @@ cityflow/
   tools/                 Script gốc của CityFlow (generator lưới, converter SUMO, debug C++)
   frontend/              Trang replay tĩnh (index.html + script.js), đã mở rộng để hiện FL log
   sample/                Dữ liệu sinh ra khi chạy — bị gitignore, không sửa tay
-docs/                    MDP_SPEC.md, FL_REPORT.md (phân tích một lần chạy demo)
+docs/                    MDP_SPEC.md, RL_INTEGRATION_GUIDE.md (viết thuật toán RL mới), FL_REPORT.md (phân tích một lần chạy demo)
 notebooks/               Notebook minh hoạ FL và tích hợp CityFlow
 ```
 
-### 6.1 Luồng chạy của `main_demo_fl.py`
+### 6.1 Luồng chạy của `main_fedmarl.py`
 
 1. `prepare_scenario()` gọi `generate_roadnet()` (chạy `cityflow/tools/generator/generate_grid_scenario.py` bằng subprocess) và `gen_config()`, ghi vào `cityflow/sample/demo_fl/`. Mọi file ở đây được **ghi đè mỗi lần chạy**; `config.json` chứa `dir` là đường dẫn tuyệt đối. `ensure_replay_enabled()` ép `saveReplay` và `rlTrafficLight` (thiếu cờ sau thì CityFlow bỏ qua `set_tl_phase()`).
-2. Mỗi giao lộ không `virtual` có một `SignalController` (đọc state, tính reward, giữ luật pha) và một `NodeAgent`. `obs_dim` và `num_phases` lấy từ controller, không hardcode.
-3. Vòng FL 0: server phát backbone của agent đầu tiên cho mọi node để cùng xuất phát từ `w⁰`.
-4. Mỗi `decision_interval` bước: `local_decision()` (`--trainer local`) hoặc `llm_decision()` (`--trainer llm`). Sau mỗi `engine.next_step()` phải gọi `controller.tick()` đúng một lần.
+2. Mỗi giao lộ không `virtual` có một `SignalController` (đọc state, tính reward, giữ luật pha) và một agent do `build_agent()` dựng theo `--trainer` (`local` → `QLearningAgent`, `dqn` → `DQNAgent`, `llm` → `BehaviorCloningAgent`). `obs_dim` và `num_phases` lấy từ controller, không hardcode.
+3. Vòng FL 0 (bỏ qua nếu `--no-fl`): server phát backbone của agent đầu tiên cho mọi node để cùng xuất phát từ `w⁰`.
+4. Mỗi `decision_interval` bước: `decision_point()` (dùng chung cho mọi thuật toán): `get_state` → `get_reward` → `store_transition` + `train_local_model` → `select_action` → `apply_action`. Sau mỗi `engine.next_step()` phải gọi `controller.tick()` đúng một lần.
 5. Mỗi `fl_interval` bước: `run_fl_round()` → `FederatedServer.run_round()` với `n_k = agent.num_local_samples`; `set_shared_weights()` đặt `n_k` về 0.
-6. Kết thúc: ghi `render/fl_log.json`, `render/fl_chart.txt` cạnh replay của CityFlow, rồi `del engine` để CityFlow ghi nốt replay.
+6. Kết thúc: ghi `render/fl_log.json`, `render/fl_chart.txt`, `render/kpi.csv` cạnh replay của CityFlow; `run_demo()` luôn `del engine` trong `finally` để CityFlow ghi nốt replay.
 
 ### 6.2 Điều cần biết khi sửa
 
-- **Observation**: `[queue × L, speed × L, density × L]` (L = số làn vào), chuẩn hoá về `[0, 1]`. `Q_MAX` và `FEATURES_PER_LANE` đang khai báo **ở cả** `main_demo_fl.py` và `agents/node_agent.py`; sửa một nơi phải sửa nơi kia (prompt LLM khử chuẩn hoá queue bằng `Q_MAX`).
+- **Observation**: `[one-hot pha × P, elapsed, queue × L, speed × L, density × L]` (L = số làn vào), chuẩn hoá về `[0, 1]`. Hợp đồng duy nhất là `env/obs_layout.py::ObsLayout`; `MockTrafficEnv`, `SignalController`, `actuated.py` và `behavior_cloning.ObservationLayout` phải khớp (có test đối chiếu). `elapsed` = giây xanh đã trôi / `min_green`, cắt ở 1; khi đang vàng thì one-hot toàn 0. `Q_MAX` khai báo trong `main_fedmarl.py` (prompt LLM khử chuẩn hoá queue bằng nó).
 - **Action**: index trong `SignalController.green_phases`, không phải chỉ số pha của CityFlow. Pha "xanh" là pha có ít nhất một luồng không phải rẽ phải; pha chỉ-rẽ-phải đầu tiên được dùng làm pha vàng. `apply_action()` trả `keep` / `switch` / `blocked`.
-- **Reward**: `−α·|Σq_in − Σq_out| + β·throughput − γ_phase·1[đổi pha]`, hằng số ở đầu `main_demo_fl.py`. `get_reward()` có trạng thái (tập xe lần trước), gọi đúng một lần mỗi decision point.
-- **Chế độ `llm`**: LLM chỉ trả KEEP(0)/CHANGE(1); `expert_action_to_phase()` đổi sang pha đích. LLM lỗi → fallback KEEP và **bỏ qua** bước cập nhật trọng số. Gemini xoay vòng qua `GEMINI_FREE_MODELS` với cooldown; trạng thái cooldown và throttle là biến lớp, dùng chung cho mọi `NodeAgent`. Key đọc từ `.env` ở gốc repo (`GEMINI_API_KEY`, `OPENAI_API_KEY`; tuỳ chọn `GEMINI_MODEL`, `OPENAI_MODEL`).
-- **`FederatedServer`**: `algorithm="fedprox"` hiện chỉ là nhãn log và `fedprox_mu` chưa được dùng — server luôn chạy FedAvg. Khi `use_clustering=True`, chỉ cụm đông nhất được tổng hợp (trọng số đều) nhưng `broadcast()` vẫn gửi cho **mọi** client.
-- `import agents` kéo theo `torch`; `main_demo_fl.py` tự chèn `cityflow/` vào `sys.path` để import `src.generators`.
+- **Reward**: `−α·|Σq_in − Σq_out| + β·throughput − γ_phase·1[đổi pha]`, hằng số ở đầu `main_fedmarl.py`. `get_reward()` có trạng thái (tập xe lần trước), gọi đúng một lần mỗi decision point. Hành động bị lớp an toàn chặn vẫn được lưu (hành động đề xuất) kèm phạt `REWARD_OVERRIDE_PENALTY`.
+- **Chế độ `llm`**: `BehaviorCloningAgent.select_action()` hỏi LLM KEEP(0)/CHANGE(1) rồi đổi sang pha đích. LLM lỗi hoặc chưa đủ xanh tối thiểu → giữ pha và transition đó **không** được học. Gemini xoay vòng qua `GEMINI_FREE_MODELS` với cooldown; trạng thái cooldown và throttle là biến lớp, dùng chung cho mọi `NodeAgent`. Key đọc từ `.env` ở gốc repo (`GEMINI_API_KEY`, `OPENAI_API_KEY`; tuỳ chọn `GEMINI_MODEL`, `OPENAI_MODEL`).
+- **FedProx** chạy ở **client**: `agent.set_fedprox_mu(mu)` (hoặc `--fedprox-mu`); `NodeAgent.train_local_model` cộng `μ/2‖w_backbone − w_global‖²`. Server vẫn chỉ chạy FedAvg và `algorithm="fedprox"` chỉ là nhãn log. Sau mỗi `load_global_weights`, hook `on_global_weights_loaded()` chạy (DQN chép backbone sang target net).
+- **`FederatedServer`**: `fedprox_mu` của server không được dùng. Khi `use_clustering=True`, chỉ cụm đông nhất được tổng hợp (trọng số đều) nhưng `broadcast()` vẫn gửi cho **mọi** client.
+- `import agents` kéo theo `torch`; `main_fedmarl.py` tự chèn `cityflow/` vào `sys.path` để import `src.generators`.
 
 ---
 
@@ -177,24 +182,27 @@ notebooks/               Notebook minh hoạ FL và tích hợp CityFlow
 Chạy trong container (thư mục làm việc `/workspace`). Từ host: thêm tiền tố `docker compose exec cityflow` khi đứng ở `cityflow/`.
 
 ```bash
-python main_demo_fl.py                                  # demo mặc định: lưới 1×2, 600 bước, trainer local
-python main_demo_fl.py --steps 200 --fl-interval 100    # chạy nhanh để kiểm tra (vài giây)
-python main_demo_fl.py --trainer llm --llm-provider openai
+python main_fedmarl.py                                  # demo mặc định: lưới 1×2, 600 bước, trainer local
+python main_fedmarl.py --trainer dqn --steps 200 --fl-interval 100   # chạy nhanh để kiểm tra (vài giây)
+python main_fedmarl.py --trainer dqn --no-fl            # đối chứng không FL
+python main_fedmarl.py --trainer llm --llm-provider openai
 python -m agents.networks                               # smoke test TrafficAgentNet, không cần CityFlow
+python -m pytest tests -q                               # test không cần CityFlow (engine giả)
+python train_fedmarl.py --hetero 1 --episodes 40 --tag het   # so sánh independent / fedavg / fedprox trên MockTrafficEnv
 ```
 
-Tham số khác: `--rows`, `--cols`, `--decision-interval`, `--seed`. `min_green`, `yellow_time`, `epsilon`, `lr` chỉ đổi được trong `DemoConfig`.
+Tham số khác: `--rows`, `--cols`, `--decision-interval`, `--seed`, `--no-fl`, `--fedprox-mu`. `min_green`, `yellow_time`, `epsilon`, `lr` chỉ đổi được trong `DemoConfig`.
 
 Smoke test `NodeAgent` + `FederatedServer` không cần CityFlow hay API key — tạo agent với `llm_provider="none"`:
 
 ```python
-agents = [NodeAgent(f"i{k}", obs_dim=36, num_phases=4, llm_provider="none") for k in range(2)]
+agents = [QLearningAgent(f"i{k}", obs_dim=89, num_phases=4) for k in range(2)]
 FederatedServer(agents).run_round(sample_counts=[1, 3])
 ```
 
-Xem replay: trên **host** chạy `python3 -m http.server 8000` trong `cityflow/frontend/`, mở <http://localhost:8000>, nạp `replay_roadnet.json` và `replay.txt` từ `cityflow/sample/demo_fl/render/` (tuỳ chọn thêm `fl_chart.txt`, `fl_log.json`). Chi tiết ở README mục "Demo FL và Giao diện Replay".
+Xem replay: trên **host** chạy `python3 -m http.server 8000` trong `cityflow/frontend/`, mở <http://localhost:8000>, nạp `replay_roadnet.json` và `replay.txt` từ `cityflow/sample/demo_fl/render/` (tuỳ chọn thêm `fl_chart.txt`, `fl_log.json`; KPI ở `kpi.csv`). Chi tiết ở README mục "Demo FL và Giao diện Replay".
 
-Chưa có test suite: sau mỗi thay đổi, chạy đoạn kiểm tra ở §2.3 và demo 200 bước ở trên; log vòng FL phải báo `local_policy_head giữ nguyên ✓` và độ lệch backbone về `0.000000`.
+Sau mỗi thay đổi: chạy `python -m pytest tests -q` (đã gồm kiểm tra §2.3) và demo 200 bước ở trên; log vòng FL phải báo `local_policy_head giữ nguyên ✓` và độ lệch backbone về `0.000000`.
 
 ---
 
@@ -204,10 +212,10 @@ Chưa có test suite: sau mỗi thay đổi, chạy đoạn kiểm tra ở §2.3
 
 | Quy tắc | Hiện trạng |
 |---|---|
-| §2.1 — `TrafficEnv` riêng | Chưa có; `SignalController` nằm trong `main_demo_fl.py` và chỉ thực thi xanh tối thiểu + vàng (không có all-red, thứ tự pha) |
-| §4 — `NodeAgent` trung lập thuật toán | `NodeAgent` chứa `train_local_step()` (TD-target Q-learning, `GAMMA`), ε-greedy trong `select_action()`, `get_q_values()`, `compute_dummy_loss()`; docstring của `TrafficAgentNet` gọi đầu ra là Q-values |
-| §4 — logic trainer nằm ở `agents/<algo>.py` | Behavior Cloning và toàn bộ client LLM nằm trong `node_agent.py`; `DQNTrainer` ghi thẳng vào `agent._loss_history`; `ReplayBuffer.is_ready` hardcode ngưỡng 64 |
-| §5.1 — bọc `try-except` và validate CityFlow | `main_demo_fl.py` gọi `cityflow.Engine`, `next_step()`, `set_tl_phase()`, `get_*` và đọc/ghi JSON không có `try-except`; engine được `del` ở cuối, không nằm trong `finally` |
+| §2.1 — `TrafficEnv` riêng | Chưa có bản bọc CityFlow; `SignalController` nằm trong `main_fedmarl.py` và chỉ thực thi xanh tối thiểu + vàng (không có all-red, thứ tự pha). `env/safety.py` đã có đủ C-01…C-05 cho `MockTrafficEnv` nhưng chưa được `SignalController` dùng |
+| §4 — `NodeAgent` trung lập thuật toán | Đã đạt: thuật toán nằm ở lớp con (`q_learning.py`, `dqn.py`, `behavior_cloning.py`). `TrafficAgentNet` chỉ có một `Linear` làm policy head (không dueling/distributional) và `build_network()` mặc định không bật `with_value` — thuật toán cần khác phải override (xem `docs/RL_INTEGRATION_GUIDE.md` §3) |
+| Chưa có / chưa làm | Baseline Centralized MARL (`agents/shared_policy.py`), neighbor embedding (MDP_SPEC §2.2), action masking, `metadata()` chưa có thống kê lưu lượng cho clustering, `ReplayBuffer` không có n-step/prioritized |
+| §5.1 — bọc `try-except` và validate CityFlow | `main_fedmarl.py` đã bọc việc tạo Engine và giải phóng trong `finally`, nhưng `next_step()`, `set_tl_phase()`, `get_*` và đọc/ghi JSON vẫn chưa có `try-except`/validate ID giao lộ và chỉ số pha |
 | §5.1 — dùng `logging` | Demo và nhánh lỗi LLM trong `NodeAgent` dùng `print` |
 | §5.2 — hyperparameter không rải trong hàm | `cluster_clients()` chuẩn hoá bằng số cứng (8, 168, 2); `max_norm=10.0` lặp lại trong `dqn.py` |
 | §3 — chỉ chạy trong Docker | README mục "Installation" và nửa sau `cityflow/cityflow.md` vẫn hướng dẫn tạo `.venv` trên host |

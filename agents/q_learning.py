@@ -62,8 +62,8 @@ class QLearningAgent(NodeAgent):
         Returns:
             Index pha xanh mong muốn, thuộc [0, num_phases).
         """
-        if not greedy and np.random.rand() < self.epsilon:
-            return int(np.random.randint(self.num_phases))
+        if not greedy and self.rng.random() < self.epsilon:
+            return int(self.rng.integers(self.num_phases))
         return super().select_action(state, greedy=True)
 
     def compute_loss(self, batch: TransitionBatch) -> torch.Tensor:

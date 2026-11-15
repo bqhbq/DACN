@@ -73,6 +73,9 @@ class NodeAgent:
         backbone_out: Kích thước embedding mà backbone trả ra.
         lr: Learning rate của optimizer cục bộ.
         device: Thiết bị chạy model; None → CPU.
+        seed: Seed của `self.rng` (dùng cho khám phá); None → ngẫu nhiên.
+        reset_optimizer_on_sync: True → dựng lại optimizer mỗi lần nhận global
+            weights (xoá moment Adam). Mặc định False: giữ moment.
 
     Raises:
         TypeError: Nếu mạng do `build_network()` trả về thiếu
@@ -88,6 +91,8 @@ class NodeAgent:
         backbone_out: int = DEFAULT_BACKBONE_OUT,
         lr: float = DEFAULT_LR,
         device: Optional[torch.device] = None,
+        seed: Optional[int] = None,
+        reset_optimizer_on_sync: bool = False,
     ) -> None:
         self.intersection_id = intersection_id
         self.obs_dim = obs_dim
@@ -96,6 +101,12 @@ class NodeAgent:
         self.backbone_out = backbone_out
         self.lr = lr
         self.device = device or torch.device("cpu")
+        # RNG riêng của agent (khám phá ε-greedy, ...) để chạy tái lập được.
+        self.rng = np.random.default_rng(seed)
+        self.reset_optimizer_on_sync = reset_optimizer_on_sync
+        # FedProx (phía client): neo = backbone toàn cục nhận lần cuối.
+        self.fedprox_mu = 0.0
+        self._global_anchor: Optional[Dict[str, torch.Tensor]] = None
 
         self.net: nn.Module = self.build_network().to(self.device)
         self._check_decoupled_architecture(self.net)
@@ -220,6 +231,9 @@ class NodeAgent:
 
         self.net.train()
         loss = self.compute_loss(batch)
+        proximal = self.proximal_term()
+        if proximal is not None:
+            loss = loss + proximal
         self.optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=GRAD_CLIP_NORM)
@@ -309,7 +323,47 @@ class NodeAgent:
                 f"{SHARED_MODULE_NAME}: {exc}"
             ) from exc
         self._local_samples = 0
+        self._global_anchor = {key: tensor.detach().clone() for key, tensor in on_device.items()}
+        if self.reset_optimizer_on_sync:
+            self.optimizer = self.build_optimizer()
+        self.on_global_weights_loaded()
         logger.debug("[%s] Đã nạp global backbone weights.", self.intersection_id)
+
+    def on_global_weights_loaded(self) -> None:
+        """Hook gọi sau mỗi lần nhận global weights; mặc định không làm gì.
+
+        Thuật toán có trạng thái phụ thuộc backbone (vd. target network của
+        DQN) ghi đè hàm này để đồng bộ lại. KHÔNG ghi đè `load_global_weights`.
+        """
+
+    def set_fedprox_mu(self, mu: float) -> None:
+        """Bật/tắt FedProx phía client.
+
+        Args:
+            mu: Hệ số proximal μ ≥ 0; 0 = FedAvg thuần.
+
+        Raises:
+            ValueError: Nếu μ < 0.
+        """
+        if mu < 0:
+            raise ValueError(f"fedprox_mu phải ≥ 0, nhận {mu}.")
+        self.fedprox_mu = float(mu)
+
+    def proximal_term(self) -> Optional[torch.Tensor]:
+        """Số hạng FedProx μ/2·‖w_backbone − w_global‖² (có gắn đồ thị tính toán).
+
+        Returns:
+            Tensor vô hướng; None nếu μ = 0 hoặc chưa nhận global weights.
+        """
+        if self.fedprox_mu <= 0.0 or self._global_anchor is None:
+            return None
+        shared = getattr(self.net, SHARED_MODULE_NAME)
+        squared = sum(
+            ((param - self._global_anchor[name]) ** 2).sum()
+            for name, param in shared.named_parameters()
+            if name in self._global_anchor
+        )
+        return 0.5 * self.fedprox_mu * squared
 
     def get_shared_weights(self) -> Dict[str, torch.Tensor]:
         """Tên cũ của `extract_weights()`, giữ cho notebook và tài liệu hiện có."""

@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from agents.networks import SHARED_MODULE_NAME
 from agents.node_agent import NodeAgent
 from agents.replay_buffer import DEFAULT_CAPACITY, ReplayBuffer, TransitionBatch
 
@@ -53,6 +54,7 @@ class DQNAgent(NodeAgent):
         eps_start: ε ban đầu.
         eps_end: ε cuối.
         eps_decay_steps: Số lần chọn action để ε giảm tuyến tính từ đầu tới cuối.
+        seed: Seed cho khám phá ε-greedy và lấy mẫu replay (tái lập được).
         **kwargs: Tham số còn lại của `NodeAgent` (hidden_dim, lr, device, ...).
     """
 
@@ -70,9 +72,10 @@ class DQNAgent(NodeAgent):
         eps_start: float = DEFAULT_EPS_START,
         eps_end: float = DEFAULT_EPS_END,
         eps_decay_steps: int = DEFAULT_EPS_DECAY_STEPS,
+        seed: int = 0,
         **kwargs: Any,
     ) -> None:
-        super().__init__(intersection_id, obs_dim, num_phases, **kwargs)
+        super().__init__(intersection_id, obs_dim, num_phases, seed=seed, **kwargs)
         self.batch_size = batch_size
         self.gamma = gamma
         self.reward_scale = reward_scale
@@ -82,7 +85,7 @@ class DQNAgent(NodeAgent):
         self.eps_end = eps_end
         self.eps_decay_steps = eps_decay_steps
 
-        self.buffer = ReplayBuffer(capacity=buffer_capacity)
+        self.buffer = ReplayBuffer(capacity=buffer_capacity, seed=seed)
         # Target network: bản sao đông lạnh của online network, không train.
         self.target_net = copy.deepcopy(self.net).to(self.device)
         self.target_net.eval()
@@ -112,8 +115,8 @@ class DQNAgent(NodeAgent):
             return super().select_action(state, greedy=True)
         epsilon = self.epsilon
         self._action_steps += 1
-        if np.random.rand() < epsilon:
-            return int(np.random.randint(self.num_phases))
+        if self.rng.random() < epsilon:
+            return int(self.rng.integers(self.num_phases))
         return super().select_action(state, greedy=True)
 
     def store_transition(
@@ -160,6 +163,12 @@ class DQNAgent(NodeAgent):
             if self._updates % self.target_sync_steps == 0:
                 self._sync_target_net()
         return loss
+
+    def on_global_weights_loaded(self) -> None:
+        """Sau FL: chép backbone mới sang target network để TD-target không cũ."""
+        getattr(self.target_net, SHARED_MODULE_NAME).load_state_dict(
+            getattr(self.net, SHARED_MODULE_NAME).state_dict()
+        )
 
     def _sync_target_net(self) -> None:
         """Cập nhật target network: θ_target ← τ·θ_online + (1 − τ)·θ_target."""

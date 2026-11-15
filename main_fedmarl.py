@@ -1,16 +1,17 @@
 """
-main_demo_fl.py
+main_fedmarl.py
 ---------------
 Demo tích hợp FedMARL-ATSC: CityFlow + NodeAgent + FederatedServer.
 
 Luồng chạy:
     1. Sinh roadnet/flow dạng lưới và config.json, bật replay logging.
     2. Mỗi DECISION_INTERVAL giây, từng NodeAgent đọc state và huấn luyện cục bộ.
-       Có hai chế độ (`--trainer`):
-         - `local` (mặc định): Q-learning một bước với reward Max-Pressure
-           (docs/MDP_SPEC.md §4) — KHÔNG cần API bên ngoài.
-         - `llm`: Behavior Cloning theo LLM (Gemini/OpenAI), cần API key
-           trong `.env`.
+       Có ba chế độ (`--trainer`), mỗi chế độ là MỘT lớp con của NodeAgent:
+         - `local` (mặc định): QLearningAgent — Q-learning một bước.
+         - `dqn`: DQNAgent — replay buffer + target network + ε giảm dần.
+         - `llm`: BehaviorCloningAgent — học theo LLM (Gemini/OpenAI), cần
+           API key trong `.env`.
+       Reward Max-Pressure theo docs/MDP_SPEC.md §4; không cần API trừ `llm`.
     3. `SignalController` áp action xuống CityFlow bằng `eng.set_tl_phase()`,
        tự chèn pha vàng và giữ thời gian xanh tối thiểu.
     4. Mỗi FL_INTERVAL giây, FederatedServer tổng hợp backbone (FedAvg có trọng
@@ -18,13 +19,16 @@ Luồng chạy:
     5. Ghi replay + FL log + chart để xem bằng `cityflow/frontend/index.html`.
 
 Cách chạy (từ thư mục gốc repo, trong môi trường đã cài CityFlow):
-    python main_demo_fl.py
-    python main_demo_fl.py --steps 1800 --fl-interval 100
-    python main_demo_fl.py --trainer llm --llm-provider openai
+    python main_fedmarl.py
+    python main_fedmarl.py --trainer dqn --steps 1800 --fl-interval 100
+    python main_fedmarl.py --trainer dqn --no-fl            # đối chứng: không FL
+    python main_fedmarl.py --trainer dqn --fedprox-mu 0.01  # FedProx phía client
+    python main_fedmarl.py --trainer llm --llm-provider openai
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import sys
@@ -48,7 +52,11 @@ import cityflow  # noqa: E402
 from src.generators.config_gen import gen_config  # noqa: E402
 from src.generators.roadnet_gen import generate_roadnet  # noqa: E402
 
+from agents.behavior_cloning import BehaviorCloningAgent, ObservationLayout  # noqa: E402
+from agents.dqn import DQNAgent  # noqa: E402
 from agents.node_agent import NodeAgent  # noqa: E402
+from agents.q_learning import QLearningAgent  # noqa: E402
+from env.obs_layout import ObsLayout  # noqa: E402
 from federated.server import FederatedServer  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -63,6 +71,7 @@ REPLAY_LOG_FILE = "render/replay.txt"
 ROADNET_LOG_FILE = "render/replay_roadnet.json"
 FL_LOG_FILE = "render/fl_log.json"    # sự kiện FL cho frontend (ô "FL Log File")
 FL_CHART_FILE = "render/fl_chart.txt"  # độ lệch backbone theo thời gian (ô "Chart File")
+KPI_CSV_FILE = "render/kpi.csv"        # KPI giao thông theo từng lần ra quyết định
 FL_CHART_TITLE = "Backbone divergence giữa các node (max |Δw|) — rơi về 0 sau mỗi vòng FL"
 
 # Ngưỡng chuẩn hoá state theo docs/MDP_SPEC.md §2.3
@@ -76,8 +85,15 @@ REWARD_ALPHA = 0.6          # α — Max-Pressure penalty
 REWARD_BETA = 0.4           # β — Throughput bonus
 REWARD_PHASE_PENALTY = 0.05  # γ_phase — phạt mỗi lần đổi pha
 
-TRAINER_LOCAL = "local"  # Q-learning cục bộ, không cần API
-TRAINER_LLM = "llm"      # Behavior Cloning theo LLM
+# Phạt khi lớp an toàn ghi đè hành động của agent (PROJECT_GUIDELINES §4.2, phương án 1)
+REWARD_OVERRIDE_PENALTY = 0.5
+
+TRAINER_LOCAL = "local"  # QLearningAgent, không cần API
+TRAINER_DQN = "dqn"      # DQNAgent
+TRAINER_LLM = "llm"      # BehaviorCloningAgent theo LLM
+
+DQN_BATCH_SIZE = 16          # nhỏ vì demo chỉ có vài chục lần ra quyết định mỗi node
+DQN_EPS_DECAY_FRAC = 0.6     # tỉ lệ số lần quyết định để ε giảm hết
 
 RIGHT_TURN = "turn_right"  # luồng rẽ phải luôn được đi, kể cả ở pha vàng
 MOVEMENT_NAMES = {"go_straight": "straight", "turn_left": "left turn"}
@@ -98,8 +114,10 @@ class DemoConfig:
         epsilon: Xác suất khám phá ε-greedy của agent.
         lr: Learning rate của optimizer cục bộ.
         seed: Seed cho CityFlow, NumPy và PyTorch.
-        trainer: Cách huấn luyện cục bộ: "local" (Q-learning) hoặc "llm".
+        trainer: Cách huấn luyện cục bộ: "local", "dqn" hoặc "llm".
         llm_provider: LLM dùng khi trainer="llm": "gemini" hoặc "openai".
+        fl: False → tắt toàn bộ FL (đối chứng "độc lập").
+        fedprox_mu: μ > 0 bật số hạng proximal FedProx ở client.
     """
 
     rows: int = 1
@@ -114,6 +132,8 @@ class DemoConfig:
     seed: int = 42
     trainer: str = TRAINER_LOCAL
     llm_provider: str = "gemini"
+    fl: bool = True
+    fedprox_mu: float = 0.0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -254,6 +274,9 @@ class SignalController:
         ]
         self._prev_incoming_vehicles: set[str] = set()
         self._switched_since_reward = False
+        # Thống kê an toàn: số đề xuất và số lần bị chặn theo lý do (KPI §5.3).
+        self.proposals: int = 0
+        self.blocked_counts: dict[str, int] = {"min_green": 0, "in_transition": 0}
 
         # Hướng mà xe đi tới (West/South/East/North), cùng thứ tự với incoming_lanes;
         # dùng để LLM đọc state bằng ngôn ngữ tự nhiên.
@@ -296,6 +319,9 @@ class SignalController:
                 )
             )
 
+        # Bố cục state dùng chung với môi trường khác: env/obs_layout.py.
+        self.layout = ObsLayout(len(self.green_phases), len(self.incoming_lanes))
+
         self.current_green: int = 0  # index trong green_phases
         self._pending_green: int | None = None
         self._yellow_left: int = 0
@@ -306,8 +332,8 @@ class SignalController:
 
     @property
     def obs_dim(self) -> int:
-        """Kích thước vector state."""
-        return len(self.incoming_lanes) * FEATURES_PER_LANE
+        """Kích thước vector state: [pha one-hot | elapsed | queue | speed | density]."""
+        return self.layout.dim
 
     @property
     def num_phases(self) -> int:
@@ -333,7 +359,11 @@ class SignalController:
         self.engine.set_tl_phase(self.intersection_id, phase_id)
 
     def get_state(self) -> np.ndarray:
-        """Đọc state cục bộ: [queue, speed, density] cho mỗi làn vào, đã chuẩn hoá.
+        """Đọc state cục bộ theo `ObsLayout` (MDP_SPEC §2.3), đã chuẩn hoá.
+
+        Bố cục: [one-hot pha xanh hiện tại × P | elapsed/min_green × 1 |
+        queue × L | speed × L | density × L]. Khi đang pha vàng, one-hot toàn 0
+        và elapsed = 0.
 
         Returns:
             Vector float32 shape (obs_dim,), mọi phần tử trong [0, 1].
@@ -354,8 +384,16 @@ class SignalController:
             speed.append(mean_speed / V_MAX)
             density.append(counts.get(lane, 0) / RHO_MAX)
 
-        state = np.array(queue + speed + density, dtype=np.float32)
-        return np.clip(state, 0.0, 1.0)
+        phase_block = np.zeros(self.layout.phase_dim, dtype=np.float32)
+        if self._pending_green is None:
+            phase_block[self.current_green] = 1.0
+            phase_block[self.layout.elapsed_index] = min(
+                self._green_elapsed / max(self.min_green, 1), 1.0
+            )
+        state = np.concatenate(
+            [phase_block, np.array(queue + speed + density, dtype=np.float32)]
+        )
+        return np.clip(state, 0.0, 1.0).astype(np.float32)
 
     def get_reward(self) -> float:
         """Tính Composite Reward của khoảng thời gian từ lần gọi trước tới giờ.
@@ -399,10 +437,15 @@ class SignalController:
         Returns:
             Mô tả ngắn kết quả: "keep", "switch" hoặc "blocked".
         """
+        self.proposals += 1
         if action == self.current_green and self._pending_green is None:
             return "keep"
         # Đang ở pha vàng hoặc chưa đủ thời gian xanh tối thiểu: giữ nguyên.
-        if self._pending_green is not None or self._green_elapsed < self.min_green:
+        if self._pending_green is not None:
+            self.blocked_counts["in_transition"] += 1
+            return "blocked"
+        if self._green_elapsed < self.min_green:
+            self.blocked_counts["min_green"] += 1
             return "blocked"
 
         self.switch_count += 1
@@ -446,17 +489,20 @@ def backbone_divergence(agents: list[NodeAgent]) -> float:
     Returns:
         Giá trị |Δw| lớn nhất trên mọi tham số backbone; bằng 0 khi đã đồng bộ.
     """
-    reference = agents[0].get_shared_weights()
+    reference = agents[0].extract_weights()
     max_diff = 0.0
     for agent in agents[1:]:
-        weights = agent.get_shared_weights()
+        weights = agent.extract_weights()
         for key, tensor in reference.items():
             max_diff = max(max_diff, float((tensor - weights[key]).abs().max()))
     return max_diff
 
 
 def run_fl_round(
-    server: FederatedServer, agents: list[NodeAgent], node_names: dict[str, str]
+    server: FederatedServer,
+    agents: list[NodeAgent],
+    node_names: dict[str, str],
+    algorithm: str = "fedavg",
 ) -> dict[str, Any]:
     """Chạy một vòng FL và in log từng chặng: uplink → aggregate → downlink.
 
@@ -464,20 +510,21 @@ def run_fl_round(
         server: FederatedServer (Central Coordinator) đã đăng ký các agent.
         agents: Danh sách NodeAgent tham gia.
         node_names: Bảng ánh xạ intersection_id → tên hiển thị.
+        algorithm: Nhãn thuật toán ghi vào log ("fedavg" hoặc "fedprox").
 
     Returns:
         Log của vòng FL (từ `FederatedServer.run_round()`), bổ sung tên node,
         độ lệch backbone trước/sau và kết quả kiểm tra head cục bộ.
     """
     before = backbone_divergence(agents)
-    head_before = [agent.local_head_norm() for agent in agents]
+    head_before = [agent.local_weights_norm() for agent in agents]
     log = server.run_round(
-        algorithm="fedavg",
+        algorithm=algorithm,
         sample_counts=[agent.num_local_samples for agent in agents],
     )
     after = backbone_divergence(agents)
     head_kept = [
-        agent.local_head_norm() == norm for agent, norm in zip(agents, head_before)
+        agent.local_weights_norm() == norm for agent, norm in zip(agents, head_before)
     ]
 
     for client, kept in zip(log["clients"], head_kept):
@@ -497,7 +544,7 @@ def run_fl_round(
             f"n_k={c['n_k']} mẫu | ‖w_k‖={c['upload_norm']:.4f}"
         )
 
-    print(f"{tag} ② AGGREGATE tại Central Coordinator: w* = Σ (n_k/N)·w_k  (FedAvg)")
+    print(f"{tag} ② AGGREGATE tại Central Coordinator: w* = Σ (n_k/N)·w_k  ({algorithm})")
     print(
         "   hệ số n_k/N: "
         + ", ".join(f"{c['name']}={c['coefficient']:.3f}" for c in clients)
@@ -526,25 +573,67 @@ def run_fl_round(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Huấn luyện cục bộ tại một node — hai chế độ
+# Huấn luyện cục bộ tại một node — dùng chung cho mọi thuật toán
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Bộ nhớ giữa hai lần quyết định: (state, action đề xuất, đã bị lớp an toàn chặn?)
+Memory = dict[str, tuple[np.ndarray, int, bool]]
 
-def local_decision(
-    agent: NodeAgent,
-    controller: SignalController,
-    memory: dict[str, tuple[np.ndarray, int]],
-) -> tuple[str, dict[str, Any]]:
-    """Một decision point ở chế độ `local` (docs/MDP_SPEC.md §6.1).
 
-    Quan sát s', nhận reward r của hành động trước, học từ transition
-    (s, a, r, s') rồi chọn hành động mới bằng ε-greedy. Safety wrapper của
-    `SignalController` có thể chặn hành động (C-02) — agent không cần biết.
+def build_agent(cfg: DemoConfig, controller: SignalController, index: int) -> NodeAgent:
+    """Dựng agent của giao lộ theo `cfg.trainer` (mỗi thuật toán là một lớp con).
 
     Args:
-        agent: NodeAgent của giao lộ.
+        cfg: Tham số demo.
+        controller: SignalController của giao lộ (nguồn của obs_dim, num_phases).
+        index: Thứ tự giao lộ, dùng để tách seed giữa các node.
+
+    Returns:
+        Agent đã khởi tạo; khởi tạo trọng số và RNG riêng theo `cfg.seed + index`.
+    """
+    torch.manual_seed(cfg.seed + index)
+    common: dict[str, Any] = {"lr": cfg.lr, "seed": cfg.seed + index}
+    ident = (controller.intersection_id, controller.obs_dim, controller.num_phases)
+    if cfg.trainer == TRAINER_LLM:
+        layout = ObservationLayout(
+            num_phases=controller.num_phases,
+            num_lanes=len(controller.incoming_lanes),
+            queue_scale=Q_MAX,
+        )
+        return BehaviorCloningAgent(
+            *ident,
+            layout=layout,
+            llm_provider=cfg.llm_provider,
+            approach_names=controller.approach_names,
+            phase_descriptions=controller.phase_descriptions,
+            **common,
+        )
+    if cfg.trainer == TRAINER_DQN:
+        decisions = max(cfg.total_steps // cfg.decision_interval, 1)
+        return DQNAgent(
+            *ident,
+            batch_size=DQN_BATCH_SIZE,
+            eps_decay_steps=int(decisions * DQN_EPS_DECAY_FRAC),
+            **common,
+        )
+    return QLearningAgent(*ident, epsilon=cfg.epsilon, **common)
+
+
+def decision_point(
+    agent: NodeAgent, controller: SignalController, memory: Memory
+) -> tuple[str, dict[str, Any]]:
+    """Một decision point — giống nhau cho mọi thuật toán (docs/MDP_SPEC.md §6.1).
+
+    Quan sát s', nhận reward r của hành động trước, `store_transition` +
+    `train_local_model`, rồi chọn hành động mới. Nếu lớp an toàn đã chặn hành
+    động trước (C-02/C-03), transition vẫn lưu hành động ĐỀ XUẤT kèm phạt
+    `REWARD_OVERRIDE_PENALTY` (PROJECT_GUIDELINES §4.2, phương án 1), nhất quán
+    với MockTrafficEnv. `get_reward()` có trạng thái nên chỉ gọi một lần ở đây.
+
+    Args:
+        agent: NodeAgent của giao lộ (lớp con bất kỳ).
         controller: SignalController của cùng giao lộ.
-        memory: (s, a) của lần quyết định trước, theo intersection_id.
+        memory: (s, a, blocked) của lần quyết định trước, theo intersection_id.
 
     Returns:
         (chuỗi tóm tắt để in, dict số liệu để ghi vào FL log).
@@ -555,51 +644,20 @@ def local_decision(
     loss: float | None = None
     previous = memory.get(agent.intersection_id)
     if previous is not None:
-        loss = agent.train_local_step(previous[0], previous[1], reward, obs)
+        prev_obs, prev_action, was_blocked = previous
+        if was_blocked:
+            reward -= REWARD_OVERRIDE_PENALTY
+        # Không có episode kết thúc trong demo → done=False (truncation ≠ terminal).
+        agent.store_transition(prev_obs, prev_action, reward, obs, False)
+        loss = agent.train_local_model()
 
     action = agent.select_action(obs)            # pha xanh mong muốn (§3.1)
     result = controller.apply_action(action)     # → eng.set_tl_phase()
-    memory[agent.intersection_id] = (obs, action)
+    memory[agent.intersection_id] = (obs, action, result == "blocked")
 
     loss_text = f"loss={loss:.4f}" if loss is not None else "loss=—"
     text = f"a={action} ({result}), r={reward:+.2f}, {loss_text}"
     info = {"action": action, "result": result, "reward": reward, "loss": loss}
-    return text, info
-
-
-def llm_decision(
-    agent: NodeAgent, controller: SignalController
-) -> tuple[str, dict[str, Any]]:
-    """Một decision point ở chế độ `llm`: LLM quyết định KEEP/CHANGE, mạng học theo.
-
-    Args:
-        agent: NodeAgent của giao lộ.
-        controller: SignalController của cùng giao lộ.
-
-    Returns:
-        (chuỗi tóm tắt để in, dict số liệu để ghi vào FL log).
-    """
-    reward = controller.get_reward()
-    # Đang pha vàng / chưa đủ xanh tối thiểu: không đổi pha được,
-    # nên không tốn một lời gọi LLM.
-    if not controller.can_switch:
-        info = {"action": None, "result": "hold", "reward": reward, "loss": None}
-        return "hold", info
-
-    obs = controller.get_state()
-    phase = controller.current_green
-    student = agent.select_action(obs, greedy=True)  # mạng đoán trước khi học
-    steps_before = len(agent.loss_history)
-    expert_action = agent.train_step(obs, current_phase=phase)
-    target = agent.expert_action_to_phase(expert_action, phase)
-    result = controller.apply_action(target)         # → eng.set_tl_phase()
-
-    loss = agent.last_loss if len(agent.loss_history) > steps_before else None
-    loss_text = f"loss={loss:.4f}" if loss is not None else "no-train"
-    text = (
-        f"LLM={expert_action}→phase {target} ({result}), student={student}, {loss_text}"
-    )
-    info = {"action": target, "result": result, "reward": reward, "loss": loss}
     return text, info
 
 
@@ -609,19 +667,43 @@ def llm_decision(
 
 
 def run_demo(cfg: DemoConfig) -> None:
-    """Chạy toàn bộ demo.
+    """Chuẩn bị kịch bản, mở Engine, chạy mô phỏng và LUÔN giải phóng Engine.
 
     Args:
         cfg: Tham số demo.
+
+    Raises:
+        RuntimeError: Nếu không khởi tạo được CityFlow Engine.
     """
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
-    # 1. Dữ liệu + config (đã bật replay)
-    config_path, config, roadnet = prepare_scenario(cfg)
-    engine = cityflow.Engine(str(config_path), thread_num=1)
+    config_path, config, roadnet = prepare_scenario(cfg)    # 1. dữ liệu + config
+    try:
+        engine = cityflow.Engine(str(config_path), thread_num=1)
+    except Exception as exc:  # ranh giới với engine C++ (CLAUDE.md §5.1)
+        raise RuntimeError(f"Không khởi tạo được CityFlow Engine từ {config_path}") from exc
+    try:
+        run_simulation(engine, cfg, config, roadnet)
+    finally:
+        del engine  # đóng Engine để CityFlow ghi nốt replay ra đĩa, kể cả khi lỗi
 
-    # 2. Mỗi giao lộ thật có một SignalController và một NodeAgent
+
+def run_simulation(
+    engine: "cityflow.Engine",
+    cfg: DemoConfig,
+    config: dict[str, Any],
+    roadnet: dict[str, Any],
+) -> None:
+    """Chạy vòng lặp mô phỏng + FL trên một Engine đã mở.
+
+    Args:
+        engine: CityFlow Engine.
+        cfg: Tham số demo.
+        config: Nội dung config.json (để in đường dẫn replay).
+        roadnet: Nội dung roadnet.json.
+    """
+    # 2. Mỗi giao lộ thật có một SignalController và một agent (lớp con NodeAgent)
     roads = {road["id"]: road for road in roadnet["roads"]}
     controllers: dict[str, SignalController] = {}
     agents: list[NodeAgent] = []
@@ -632,30 +714,26 @@ def run_demo(cfg: DemoConfig) -> None:
         controller = SignalController(
             engine, intersection, roads, cfg.min_green, cfg.yellow_time
         )
-        agent = NodeAgent(
-            intersection_id=controller.intersection_id,
-            obs_dim=controller.obs_dim,
-            num_phases=controller.num_phases,
-            lr=cfg.lr,
-            epsilon=cfg.epsilon,
-            llm_provider=cfg.llm_provider if cfg.trainer == TRAINER_LLM else "none",
-            approach_names=controller.approach_names,
-            phase_descriptions=controller.phase_descriptions,
-        )
+        agent = build_agent(cfg, controller, index=len(agents))
+        if cfg.fedprox_mu > 0:
+            agent.set_fedprox_mu(cfg.fedprox_mu)
         controllers[controller.intersection_id] = controller
         agents.append(agent)
         node_names[controller.intersection_id] = f"Node_{len(agents)}"
 
     # Kiểm tra kiến trúc Decoupled (AGENTS.md §5.3): head không được rời node.
     for agent in agents:
-        shared = agent.get_shared_weights()
-        assert not any("local_policy_head" in key for key in shared), "R-02 vi phạm!"
+        shared = agent.extract_weights()
+        if any("local_policy_head" in key for key in shared):
+            raise RuntimeError("R-02 vi phạm: local_policy_head nằm trong shared weights!")
 
+    algorithm = "fedprox" if cfg.fedprox_mu > 0 else "fedavg"
     server = FederatedServer(clients=agents)
-    # Vòng 0 của FL: mọi node xuất phát từ CÙNG một backbone w⁰ do server phát,
-    # nếu không vòng 1 sẽ phải lấy trung bình hai mạng khởi tạo ngẫu nhiên khác nhau.
-    server.aggregate([agents[0].get_shared_weights()])
-    server.broadcast()
+    if cfg.fl:
+        # Vòng 0 của FL: mọi node xuất phát từ CÙNG một backbone w⁰ do server phát,
+        # nếu không vòng 1 sẽ phải lấy trung bình hai mạng khởi tạo ngẫu nhiên khác nhau.
+        server.aggregate([agents[0].extract_weights()])
+        server.broadcast()
 
     print("=" * 72)
     print(" FedMARL-ATSC — Demo FL trên CityFlow")
@@ -667,25 +745,22 @@ def run_demo(cfg: DemoConfig) -> None:
         )
     print(
         f" Mô phỏng {cfg.total_steps} bước | quyết định mỗi {cfg.decision_interval}s | "
-        f"FL mỗi {cfg.fl_interval} bước"
+        + (f"FL mỗi {cfg.fl_interval} bước ({algorithm})" if cfg.fl else "KHÔNG dùng FL (độc lập)")
     )
-    trainer_text = (
-        f"LLM [{cfg.llm_provider}] — Behavior Cloning"
-        if cfg.trainer == TRAINER_LLM
-        else "local — Q-learning một bước, reward Max-Pressure (không dùng API)"
-    )
-    print(f" Huấn luyện cục bộ: {trainer_text}")
-    print(
-        f" [FL Round 0] Central Coordinator ──▶ {len(agents)} node: phát backbone "
-        f"khởi tạo chung w⁰ (độ lệch = {backbone_divergence(agents):.6f})"
-    )
+    print(f" Huấn luyện cục bộ: {type(agents[0]).__name__} (--trainer {cfg.trainer})")
+    if cfg.fl:
+        print(
+            f" [FL Round 0] Central Coordinator ──▶ {len(agents)} node: phát backbone "
+            f"khởi tạo chung w⁰ (độ lệch = {backbone_divergence(agents):.6f})"
+        )
     print("=" * 72)
 
     # 3. Vòng lặp mô phỏng
-    memory: dict[str, tuple[np.ndarray, int]] = {}   # (s, a) lần trước của mỗi node
+    memory: Memory = {}                              # (s, a, blocked) lần trước của mỗi node
     decisions: list[dict[str, Any]] = []             # ghi cho frontend
     rounds: list[dict[str, Any]] = []
     chart_values: list[float] = []
+    kpi_rows: list[dict[str, Any]] = []
     divergence = backbone_divergence(agents)
 
     for step in range(cfg.total_steps):
@@ -694,18 +769,26 @@ def run_demo(cfg: DemoConfig) -> None:
             record: dict[str, Any] = {}
             for agent in agents:
                 controller = controllers[agent.intersection_id]
-                if cfg.trainer == TRAINER_LLM:
-                    text, info = llm_decision(agent, controller)
-                else:
-                    text, info = local_decision(agent, controller, memory)
+                text, info = decision_point(agent, controller, memory)
                 info["n_k"] = agent.num_local_samples
                 info["phase"] = controller.current_green
                 record[agent.intersection_id] = info
                 summary.append(f"{node_names[agent.intersection_id]}: {text}")
             divergence = backbone_divergence(agents)
             decisions.append({"step": step, "divergence": divergence, "nodes": record})
+            waiting = engine.get_lane_waiting_vehicle_count()
+            kpi_rows.append({
+                "step": step,
+                "vehicles": engine.get_vehicle_count(),
+                "waiting": sum(
+                    waiting.get(lane, 0)
+                    for c in controllers.values() for lane in c.incoming_lanes
+                ),
+                "mean_reward": float(np.mean([r["reward"] for r in record.values()])),
+                "divergence": divergence,
+            })
             print(
-                f"[Step {step:04d}] xe={engine.get_vehicle_count():3d} | "
+                f"[Step {step:04d}] xe={kpi_rows[-1]['vehicles']:3d} | "
                 + " | ".join(summary)
             )
 
@@ -713,24 +796,41 @@ def run_demo(cfg: DemoConfig) -> None:
         for controller in controllers.values():
             controller.tick()
 
-        # Sau mỗi N bước: tổng hợp backbone tại FL Server
-        if (step + 1) % cfg.fl_interval == 0:
-            round_log = run_fl_round(server, agents, node_names)
+        # Sau mỗi N bước: tổng hợp backbone tại FL Server (trừ khi --no-fl)
+        if cfg.fl and (step + 1) % cfg.fl_interval == 0:
+            round_log = run_fl_round(server, agents, node_names, algorithm)
             round_log["step"] = step
             rounds.append(round_log)
             divergence = round_log["divergence_after"]
 
         chart_values.append(divergence)
 
-    # Ghi file phụ cho frontend: FL log (JSON) và chart (text, mỗi bước một dòng).
+    # KPI tổng hợp (PROJECT_GUIDELINES §5): giao thông + an toàn
+    proposals = sum(c.proposals for c in controllers.values())
+    blocked_by_reason = {
+        reason: sum(c.blocked_counts[reason] for c in controllers.values())
+        for reason in ("min_green", "in_transition")
+    }
+    kpi_summary = {
+        "avg_travel_time": engine.get_average_travel_time(),
+        "mean_waiting_vehicles": float(np.mean([r["waiting"] for r in kpi_rows])),
+        "switches": sum(c.switch_count for c in controllers.values()),
+        "proposals": proposals,
+        "blocked": blocked_by_reason,
+        "safety_violation_rate": sum(blocked_by_reason.values()) / max(proposals, 1),
+    }
+
+    # Ghi file phụ cho frontend: FL log (JSON), chart (text) và KPI (CSV).
     (SCENARIO_DIR / FL_LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
     fl_log = {
         "trainer": cfg.trainer,
+        "fl": cfg.fl,
         "total_steps": cfg.total_steps,
         "fl_interval": cfg.fl_interval,
         "nodes": node_names,
         "decisions": decisions,
         "rounds": rounds,
+        "kpi_summary": kpi_summary,
     }
     with (SCENARIO_DIR / FL_LOG_FILE).open("w", encoding="utf-8") as file:
         json.dump(fl_log, file, ensure_ascii=False, indent=1)
@@ -739,21 +839,25 @@ def run_demo(cfg: DemoConfig) -> None:
         # CityFlow ghi replay nhiều hơn số bước một khung hình, nên lặp lại
         # giá trị cuối để chart luôn đủ dòng cho frontend.
         file.writelines(f"{value:.6f}\n" for value in [*chart_values, chart_values[-1]])
+    with (SCENARIO_DIR / KPI_CSV_FILE).open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(kpi_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(kpi_rows)
 
     # 4. Tổng kết
     print("=" * 72)
     print(f" Hoàn tất {cfg.total_steps} bước, {len(server.round_logs)} vòng FL.")
-    print(f" Average travel time: {engine.get_average_travel_time():.1f}s")
+    print(f" Average travel time: {kpi_summary['avg_travel_time']:.1f}s")
+    print(
+        f" Hàng đợi TB: {kpi_summary['mean_waiting_vehicles']:.1f} xe | "
+        f"vi phạm/bị chặn: {kpi_summary['safety_violation_rate']:.1%} "
+        f"({kpi_summary['blocked']})"
+    )
     for agent in agents:
         controller = controllers[agent.intersection_id]
-        llm_text = (
-            f" | LLM gọi {agent.llm_calls} lần, lỗi {agent.llm_failures}"
-            if cfg.trainer == TRAINER_LLM
-            else ""
-        )
         print(
             f" {node_names[agent.intersection_id]}: đổi pha {controller.switch_count} lần | "
-            f"{len(agent.loss_history)} bước huấn luyện cục bộ{llm_text}"
+            f"{len(agent.loss_history)} bước huấn luyện cục bộ | {agent.stats()}"
         )
     # In đường dẫn tương đối với gốc repo để dùng được cả trên host lẫn trong container.
     replay_dir = SCENARIO_DIR.relative_to(ROOT_DIR)
@@ -762,9 +866,8 @@ def run_demo(cfg: DemoConfig) -> None:
     print(f"   Replay File : {replay_dir / config['replayLogFile']}")
     print(f"   Chart File  : {replay_dir / FL_CHART_FILE}  (tuỳ chọn)")
     print(f"   FL Log File : {replay_dir / FL_LOG_FILE}  (tuỳ chọn)")
+    print(f"   KPI CSV     : {replay_dir / KPI_CSV_FILE}")
     print("=" * 72)
-
-    del engine  # đóng Engine để CityFlow ghi nốt replay ra đĩa
 
 
 def parse_args() -> DemoConfig:
@@ -780,10 +883,19 @@ def parse_args() -> DemoConfig:
     parser.add_argument("--fl-interval", type=int, default=defaults.fl_interval)
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument(
-        "--trainer", choices=(TRAINER_LOCAL, TRAINER_LLM), default=defaults.trainer
+        "--trainer",
+        choices=(TRAINER_LOCAL, TRAINER_DQN, TRAINER_LLM),
+        default=defaults.trainer,
     )
     parser.add_argument(
         "--llm-provider", choices=("gemini", "openai"), default=defaults.llm_provider
+    )
+    parser.add_argument(
+        "--no-fl", action="store_true", help="Tắt FL (đối chứng: các node học độc lập)."
+    )
+    parser.add_argument(
+        "--fedprox-mu", type=float, default=defaults.fedprox_mu,
+        help="μ > 0 bật số hạng proximal FedProx ở client.",
     )
     args = parser.parse_args()
     return DemoConfig(
@@ -795,6 +907,8 @@ def parse_args() -> DemoConfig:
         seed=args.seed,
         trainer=args.trainer,
         llm_provider=args.llm_provider,
+        fl=not args.no_fl,
+        fedprox_mu=args.fedprox_mu,
     )
 
 
