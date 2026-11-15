@@ -41,11 +41,11 @@ $$s_i^t = \left[ s_i^{\text{local}},\ s_i^{\text{neighbor}} \right]$$
 | **Approach flow** | $f_l^t$ | Số xe tiếp cận mỗi làn trong $\Delta t$ giây | $[0, 1]$ so với $F_{\max}$ | $N_{\text{lanes}}$ |
 | **Average speed** | $v_l^t$ | Tốc độ trung bình xe trên làn $l$ | $[0, 1]$ so với $v_{\max}$ | $N_{\text{lanes}}$ |
 
-Với `sample_map_2` (28 làn, 4 pha):
+<!-- Với `sample_map_2` (28 làn, 4 pha):
 $$\dim(s_i^{\text{local}}) = 4 + 1 + 28 + 28 + 28 = 89$$
 
 > **Implementation hiện tại** (Phase 1 — simplified): Dùng 3 đặc trưng mỗi làn (queue, speed, density), bỏ qua elapsed time và approach flow.
-> $$\dim(s_i^{\text{local}}) = 28 \times 3 = 84$$
+> $$\dim(s_i^{\text{local}}) = 28 \times 3 = 84$$ -->
 
 ### 2.2 Trạng thái lân cận (Neighboring State — $s_i^{\text{neighbor}}$)
 

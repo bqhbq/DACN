@@ -58,6 +58,7 @@ class FederatedServer:
         self.global_weights:  Optional[Dict[str, torch.Tensor]] = None
         self._round_logs:     List[Dict] = []
         self._fl_round:       int        = 0
+        self._last_coefficients: List[float] = []   # n_k/N của lần aggregate gần nhất
 
         logger.info(
             "FederatedServer khởi tạo: %d clients, clustering=%s, mu=%.3f",
@@ -99,7 +100,7 @@ class FederatedServer:
         K = len(list_of_weights)
 
         # Trọng số tổng hợp theo kích thước dataset (mặc định đều nhau)
-        if sample_counts is None:
+        if sample_counts is None or sum(sample_counts) <= 0:
             weights_norm = [1.0 / K] * K
         else:
             total = sum(sample_counts)
@@ -115,6 +116,7 @@ class FederatedServer:
             avg[key] = stacked.sum(dim=0)
 
         self.global_weights = avg
+        self._last_coefficients = weights_norm
 
         logger.info(
             "Round %d | aggregate(%s) | %d clients | %d param tensors",
@@ -246,36 +248,69 @@ class FederatedServer:
         """
         self._fl_round += 1
 
-        # Bước 1: Thu thập
-        weight_packets = [c.get_shared_weights() for c in self.clients]
-        logger.info(
-            "Round %d | Thu thập weights từ %d clients", self._fl_round, len(self.clients)
-        )
-
-        # Bước 2 & 3: Aggregate (có / không có clustering)
+        # Bước 1: Thu thập (uplink: Node → Server). Với clustering, chỉ cụm
+        # đông nhất tham gia và các client được coi là ngang nhau.
+        participants = list(self.clients)
+        counts = sample_counts
         if self.use_clustering:
             clusters = self.cluster_clients()
-            # Aggregate theo từng cụm, dùng cụm đông nhất làm global
-            best_cluster = max(clusters.items(), key=lambda x: len(x[1]))
-            cluster_clients = best_cluster[1]
-            cluster_weights = [c.get_shared_weights() for c in cluster_clients]
-            self.aggregate(cluster_weights, algorithm=algorithm)
-        else:
-            self.aggregate(weight_packets, sample_counts=sample_counts, algorithm=algorithm)
+            participants = max(clusters.values(), key=len)
+            counts = None
+        weight_packets = [c.get_shared_weights() for c in participants]
+        logger.info(
+            "Round %d | Thu thập weights từ %d clients", self._fl_round, len(participants)
+        )
 
-        # Bước 4: Broadcast
+        # Bước 2 & 3: Aggregate
+        self.aggregate(weight_packets, sample_counts=counts, algorithm=algorithm)
+        coefficients = self._last_coefficients
+
+        # Bước 4: Broadcast (downlink: Server → Node)
         self.broadcast()
 
-        # Ghi log
+        # Ghi log — đủ chi tiết để bên gọi in ra/hiển thị luồng truyền trọng số
+        # Phần tử minh hoạ: trong tensor đầu tiên, chọn vị trí mà các client
+        # khác nhau nhiều nhất để thấy rõ tác dụng của phép lấy trung bình.
+        example_key = next(iter(self.global_weights))
+        stacked = torch.stack([p[example_key].float().flatten() for p in weight_packets])
+        example_idx = int((stacked.max(dim=0).values - stacked.min(dim=0).values).argmax())
         log = {
             "fl_round":      self._fl_round,
             "num_clients":   len(self.clients),
             "algorithm":     algorithm,
             "use_clustering": self.use_clustering,
             "param_tensors": len(self.global_weights),
+            "global_norm":   self._l2_norm(self.global_weights),
+            "clients": [
+                {
+                    "intersection_id": getattr(client, "intersection_id", f"client_{idx}"),
+                    "n_k":         int(counts[idx]) if counts is not None else None,
+                    "coefficient": coefficients[idx],
+                    "num_params":  sum(t.numel() for t in packet.values()),
+                    "size_kb":     sum(t.numel() * t.element_size() for t in packet.values()) / 1024,
+                    "upload_norm": self._l2_norm(packet),
+                    # ‖w* − w_k‖: backbone của client này bị kéo đi bao xa
+                    "delta_norm":  self._l2_norm(
+                        {k: self.global_weights[k] - packet[k].float() for k in packet}
+                    ),
+                }
+                for idx, (client, packet) in enumerate(zip(participants, weight_packets))
+            ],
+            # Một phần tử trọng số cụ thể để minh hoạ phép tính w* = Σ n_k/N · w_k
+            "example": {
+                "key":           example_key,
+                "index":         example_idx,
+                "client_values": [float(v) for v in stacked[:, example_idx]],
+                "global_value":  float(self.global_weights[example_key].flatten()[example_idx]),
+            },
         }
         self._round_logs.append(log)
         return log
+
+    @staticmethod
+    def _l2_norm(weights: Dict[str, torch.Tensor]) -> float:
+        """Chuẩn L2 của toàn bộ một state_dict (coi như một vector phẳng)."""
+        return math.sqrt(sum(float((t.float() ** 2).sum()) for t in weights.values()))
 
     # ──────────────────────────────────────────────────────────────────────────
     # Utilities

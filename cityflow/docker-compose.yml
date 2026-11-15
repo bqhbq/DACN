@@ -1,0 +1,14 @@
+# Chạy từ thư mục cityflow/:  docker compose up -d --build
+name: fedmarl-atsc
+
+services:
+  cityflow:
+    build:
+      context: ..
+      dockerfile: cityflow/Dockerfile
+    image: fedmarl-atsc/cityflow:latest
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+    # Dừng ngay khi `docker compose down/stop` (sleep không tự xử lý SIGTERM khi là PID 1).
+    init: true

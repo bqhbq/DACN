@@ -108,6 +108,7 @@ let ready = false;
 let roadnetData = [];
 let replayData = [];
 let chartData = [];
+let flData = [];
 
 function handleChooseFile(v, label_dom) {
     return function(evt) {
@@ -189,6 +190,8 @@ function start() {
                 chartConainterDOM.classList.add("d-none");
             }
 
+            fl.init(FlFileDom.files.length ? flData[0] : null, totalStep);
+
             controls.paused = false;
             cnt = 0;
             debugMode = document.getElementById("debug-mode").checked;
@@ -208,12 +211,21 @@ function start() {
         };
 
 
+        // Optional files are loaded in sequence: chart, then FL log.
+        let load_fl = function() {
+            if (FlFileDom.files.length) {
+                uploadFile(flData, FlFileDom.files[0], after_update);
+            } else {
+                after_update();
+            }
+        };
+
         if (ChartFileDom.value) {
             showChart = true;
-            uploadFile(chartData, ChartFileDom.files[0], after_update);
+            uploadFile(chartData, ChartFileDom.files[0], load_fl);
         } else {
             showChart = false;
-            after_update();
+            load_fl();
         }
 
     }); // replay callback
@@ -223,6 +235,7 @@ function start() {
 let RoadnetFileDom = document.getElementById("roadnet-file");
 let ReplayFileDom = document.getElementById("replay-file");
 let ChartFileDom = document.getElementById("chart-file");
+let FlFileDom = document.getElementById("fl-file");
 
 RoadnetFileDom.addEventListener("change",
     handleChooseFile(roadnetData, document.getElementById("roadnet-label")), false);
@@ -230,6 +243,8 @@ ReplayFileDom.addEventListener("change",
     handleChooseFile(replayData, document.getElementById("replay-label")), false);
 ChartFileDom.addEventListener("change",
     handleChooseFile(chartData, document.getElementById("chart-label")), false);
+FlFileDom.addEventListener("change",
+    handleChooseFile(flData, document.getElementById("fl-label")), false);
 
 document.getElementById("start-btn").addEventListener("click", start);
 
@@ -447,6 +462,7 @@ function drawRoadnet() {
         signal.anchor.set(1, 0.5);
         carPool.push([car, signal]);
     }
+    fl.drawOverlay();
     showCanvas();
 
     return true;
@@ -728,6 +744,7 @@ function drawStep(step) {
         carPool[i][1].height = width;
         turnSignalContainer.addChild(carPool[i][1]);
     }
+    fl.update(step);
     nodeCarNum.innerText = carLogs.length-1;
     nodeTotalStep.innerText = totalStep;
     nodeCurrentStep.innerText = cnt+1;
@@ -778,4 +795,250 @@ let chart = {
             this.data.series[i] = [];
     },
     ptr: 0
+};
+
+
+/*
+Federated Learning view (optional "FL Log File" = fl_log.json written by main_demo_fl.py)
+
+ - Side panel (#fl-panel): per-node local training stats, and the numbers of the
+   latest FL round (n_k, FedAvg coefficients, norms, a worked example).
+ - Map overlay: a "FL Server" box linked to every node agent. Right after each
+   FL round the links animate: node -> server (upload backbone), aggregation at
+   the server, server -> node (broadcast global backbone).
+ */
+FL_ANIM_STEPS = 24;          // replay steps the weight-exchange animation lasts
+FL_COLOR_IDLE = 0x9aa5ad;
+FL_COLOR_UP = 0xf08c00;      // uplink: node -> server
+FL_COLOR_AGG = 0x7048e8;     // aggregation at the server
+FL_COLOR_DOWN = 0x2f9e44;    // downlink: server -> node
+FL_SERVER_OFFSET = 170;      // distance of the server box above the road network
+FL_STAGES = ["idle", "up", "agg", "down"];
+
+let fl = {
+    enabled: false,
+    data: null,
+    decisionAt: [],   // step -> index of the latest decision at or before it (-1: none)
+    roundAt: [],      // step -> index of the latest FL round at or before it (-1: none)
+    panelDOM: document.getElementById("fl-panel"),
+    linkG: null,
+    serverG: null,
+    serverText: null,
+    serverPos: null,
+    nodePos: {},
+    lastKey: "",
+
+    init: function(text, totalStep) {
+        this.enabled = false;
+        this.data = null;
+        this.lastKey = "";
+        this.panelDOM.classList.add("d-none");
+        if (!text) return;
+        try {
+            this.data = JSON.parse(text);
+        } catch (e) {
+            infoAppend("Parsing FL log file failed");
+            return;
+        }
+        this.decisionAt = this._indexBySteps(this.data.decisions, totalStep);
+        this.roundAt = this._indexBySteps(this.data.rounds, totalStep);
+        this.enabled = true;
+        this.panelDOM.classList.remove("d-none");
+        infoAppend("FL log loaded: " + this.data.rounds.length + " FL rounds");
+    },
+
+    // For every replay step, the index of the latest event whose step <= it.
+    _indexBySteps: function(events, totalStep) {
+        let result = new Array(totalStep);
+        let ptr = -1;
+        for (let step = 0; step < totalStep; ++step) {
+            while (ptr + 1 < events.length && events[ptr + 1].step <= step) ptr += 1;
+            result[step] = ptr;
+        }
+        return result;
+    },
+
+    drawOverlay: function() {
+        if (!this.enabled) return;
+        try {
+            this.nodePos = {};
+            let sumX = 0, minY = Infinity, count = 0;
+            for (let nodeId in this.data.nodes) {
+                if (!nodes[nodeId]) continue;
+                let point = nodes[nodeId].point;
+                this.nodePos[nodeId] = point;
+                sumX += point.x;
+                minY = Math.min(minY, point.y);
+                count += 1;
+            }
+            if (count == 0) {
+                infoAppend("FL log does not match this roadnet");
+                this.enabled = false;
+                this.panelDOM.classList.add("d-none");
+                return;
+            }
+            // Canvas y grows downwards, so "above the map" means a smaller y.
+            this.serverPos = new Point(sumX / count, minY - FL_SERVER_OFFSET);
+
+            this.linkG = new Graphics();
+            this.serverG = new Graphics();
+            simulatorContainer.addChild(this.linkG);
+            simulatorContainer.addChild(this.serverG);
+
+            this.serverText = new PIXI.Text("FL Server", {
+                fontFamily: "Arial", fontSize: 16, fontWeight: "bold", fill: 0xffffff, align: "center"
+            });
+            this.serverText.anchor.set(0.5, 0.5);
+            this.serverText.position.set(this.serverPos.x, this.serverPos.y);
+            simulatorContainer.addChild(this.serverText);
+
+            for (let nodeId in this.nodePos) {
+                let label = new PIXI.Text(this.data.nodes[nodeId], {
+                    fontFamily: "Arial", fontSize: 14, fontWeight: "bold", fill: 0x343a40
+                });
+                label.anchor.set(0, 1);
+                label.position.set(this.nodePos[nodeId].x + 22, this.nodePos[nodeId].y - 22);
+                simulatorContainer.addChild(label);
+            }
+        } catch (e) {
+            console.error(e.message);
+            this.enabled = false;
+        }
+    },
+
+    // Which part of the weight exchange is being shown at this step, and how far along it is.
+    _stage: function(step, round) {
+        if (!round) return {name: "idle", progress: 0};
+        let elapsed = step - round.step;
+        if (elapsed < 0 || elapsed >= FL_ANIM_STEPS) return {name: "idle", progress: 0};
+        let third = FL_ANIM_STEPS / 3;
+        let index = Math.min(2, Math.floor(elapsed / third));
+        return {name: FL_STAGES[index + 1], progress: (elapsed - index * third) / third};
+    },
+
+    update: function(step) {
+        if (!this.enabled) return;
+        try {
+            let decisionIdx = this.decisionAt[step];
+            let roundIdx = this.roundAt[step];
+            let round = roundIdx >= 0 ? this.data.rounds[roundIdx] : null;
+            let stage = this._stage(step, round);
+
+            this._drawLinks(stage, round);
+
+            // The panel only changes when a new decision/round/stage starts.
+            let key = decisionIdx + "|" + roundIdx + "|" + stage.name;
+            if (key != this.lastKey) {
+                this.lastKey = key;
+                let decision = decisionIdx >= 0 ? this.data.decisions[decisionIdx] : null;
+                this.panelDOM.innerHTML = this._panelHTML(decision, round, stage);
+            }
+        } catch (e) {
+            // Never let the FL view break the replay itself.
+            console.error(e.message);
+            this.enabled = false;
+        }
+    },
+
+    _drawLinks: function(stage, round) {
+        let color = {idle: FL_COLOR_IDLE, up: FL_COLOR_UP, agg: FL_COLOR_AGG, down: FL_COLOR_DOWN}[stage.name];
+        let active = stage.name == "up" || stage.name == "down";
+
+        this.linkG.clear();
+        for (let nodeId in this.nodePos) {
+            let nodePoint = this.nodePos[nodeId];
+            this.linkG.lineStyle(active ? 3 : 1, active ? color : FL_COLOR_IDLE, active ? 0.9 : 0.5);
+            this.linkG.drawDashLine(nodePoint, this.serverPos, 10, 6);
+            if (active) {
+                // A "weights packet" travelling along the link.
+                let from = stage.name == "up" ? nodePoint : this.serverPos;
+                let to = stage.name == "up" ? this.serverPos : nodePoint;
+                let x = from.x + (to.x - from.x) * stage.progress;
+                let y = from.y + (to.y - from.y) * stage.progress;
+                this.linkG.lineStyle(0);
+                this.linkG.beginFill(color);
+                this.linkG.drawCircle(x, y, 7);
+                this.linkG.endFill();
+            }
+        }
+
+        this.serverG.clear();
+        this.serverG.lineStyle(2, 0xffffff, 0.9);
+        this.serverG.beginFill(stage.name == "idle" ? 0x495057 : color);
+        this.serverG.drawRoundedRect(this.serverPos.x - 70, this.serverPos.y - 24, 140, 48, 8);
+        this.serverG.endFill();
+        this.serverText.text = "FL Server\n" + (round ? "round " + round.fl_round : "waiting");
+    },
+
+    _esc: function(value) {
+        return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    },
+
+    _num: function(value, digits) {
+        return (value === null || value === undefined) ? "–" : Number(value).toFixed(digits);
+    },
+
+    _panelHTML: function(decision, round, stage) {
+        let esc = this._esc, num = this._num;
+        let html = "<h6>Federated Learning</h6>";
+        html += "<div class='fl-muted'>Local trainer: <b>" + esc(this.data.trainer) + "</b> · FL round every "
+            + esc(this.data.fl_interval) + " steps · rounds done: <b>" + (round ? round.fl_round : 0) + "</b></div>";
+
+        let stageText = {
+            idle: "Local training at each node (no weights are being sent)",
+            up: "① UPLINK: Node Agents ──▶ FL Server (backbone only)",
+            agg: "② AGGREGATE at FL Server: w* = Σ (n_k/N)·w_k",
+            down: "③ DOWNLINK: FL Server ──▶ Node Agents (broadcast w*)"
+        }[stage.name];
+        let stageClass = {idle: "", up: "fl-up", agg: "fl-agg", down: "fl-down"}[stage.name];
+        html += "<div class='fl-stage " + stageClass + "'>" + stageText + "</div>";
+
+        // Local training at each node
+        html += "<table><thead><tr><th>Node</th><th>phase</th><th>action</th><th>reward</th><th>loss</th><th>n_k</th></tr></thead><tbody>";
+        for (let nodeId in this.data.nodes) {
+            let info = decision ? decision.nodes[nodeId] : null;
+            html += "<tr><td><b>" + esc(this.data.nodes[nodeId]) + "</b></td>";
+            if (info) {
+                let action = (info.action === null || info.action === undefined) ? "–" : info.action;
+                html += "<td>" + esc(info.phase) + "</td><td>" + esc(action) + " <span class='fl-muted'>(" + esc(info.result) + ")</span></td>"
+                    + "<td>" + num(info.reward, 2) + "</td><td>" + num(info.loss, 4) + "</td><td>" + esc(info.n_k) + "</td>";
+            } else {
+                html += "<td colspan='5' class='fl-muted'>no decision yet</td>";
+            }
+            html += "</tr>";
+        }
+        html += "</tbody></table>";
+        if (decision) {
+            html += "<div class='fl-muted'>Backbone divergence between nodes (max |Δw|): <b>"
+                + num(decision.divergence, 6) + "</b> at step " + decision.step + "</div>";
+        }
+
+        // Latest FL round
+        if (!round) {
+            html += "<div class='fl-muted mt-2'>No FL round yet.</div>";
+            return html;
+        }
+        html += "<h6 class='mt-2'>FL round " + round.fl_round + " <span class='fl-muted'>(step " + (round.step + 1)
+            + ", " + esc(round.algorithm) + ", " + round.param_tensors + " tensors)</span></h6>";
+        html += "<table><thead><tr><th>Node</th><th>n_k</th><th>n_k/N</th><th>‖w_k‖ sent</th><th>‖w*−w_k‖</th><th>head</th></tr></thead><tbody>";
+        for (let i = 0; i < round.clients.length; ++i) {
+            let c = round.clients[i];
+            html += "<tr><td><b>" + esc(c.name) + "</b></td><td>" + esc(c.n_k) + "</td><td>" + num(c.coefficient, 3)
+                + "</td><td>" + num(c.upload_norm, 4) + "</td><td>" + num(c.delta_norm, 4) + "</td><td>"
+                + (c.head_unchanged ? "kept ✓" : "CHANGED ✗") + "</td></tr>";
+        }
+        html += "</tbody></table>";
+
+        let terms = [];
+        for (let i = 0; i < round.clients.length; ++i) {
+            terms.push(num(round.clients[i].coefficient, 3) + "×(" + num(round.example.client_values[i], 5) + ")");
+        }
+        html += "<div class='fl-formula'>" + esc(round.example.key) + "[" + round.example.index + "]: "
+            + terms.join(" + ") + " = <b>" + num(round.example.global_value, 5) + "</b></div>";
+        html += "<div class='fl-muted'>Each upload: " + round.clients[0].num_params.toLocaleString() + " params ("
+            + num(round.clients[0].size_kb, 1) + " KB) · ‖w*‖ = " + num(round.global_norm, 4) + "</div>";
+        html += "<div>Divergence: <b>" + num(round.divergence_before, 6) + "</b> → <b>"
+            + num(round.divergence_after, 6) + "</b></div>";
+        return html;
+    }
 };

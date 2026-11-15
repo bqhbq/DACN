@@ -1,0 +1,3 @@
+# Image chỉ cần requirements.txt; mã nguồn được mount lúc chạy.
+*
+!requirements.txt

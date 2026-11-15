@@ -62,3 +62,62 @@ html, body {
     width: 100%;
     text-align: center;
 }
+/* ── Federated Learning panel ─────────────────────────────────────────── */
+#fl-panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 400px;
+    max-width: 45%;
+    max-height: 70%;
+    overflow-y: auto;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: #343a40;
+    background-color: rgba(255, 255, 255, 0.93);
+    border: 1px solid #ced4da;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    z-index: 2;
+}
+
+#fl-panel h6 {
+    margin: 0 0 4px 0;
+    font-weight: bold;
+}
+
+#fl-panel table {
+    width: 100%;
+    margin: 4px 0 8px 0;
+}
+
+#fl-panel th, #fl-panel td {
+    padding: 1px 4px;
+    text-align: right;
+    white-space: nowrap;
+}
+
+#fl-panel th:first-child, #fl-panel td:first-child {
+    text-align: left;
+}
+
+#fl-panel thead th {
+    border-bottom: 1px solid #dee2e6;
+    color: #6c757d;
+}
+
+#fl-panel .fl-stage {
+    margin: 4px 0;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-weight: bold;
+    background-color: #e9ecef;
+}
+
+#fl-panel .fl-stage.fl-up   { background-color: #ffe8cc; color: #b35c00; }
+#fl-panel .fl-stage.fl-agg  { background-color: #e5dbff; color: #5f3dc4; }
+#fl-panel .fl-stage.fl-down { background-color: #d3f9d8; color: #2b8a3e; }
+
+#fl-panel .fl-muted { color: #868e96; }
+#fl-panel .fl-formula { font-family: monospace; font-size: 11px; word-break: break-all; }

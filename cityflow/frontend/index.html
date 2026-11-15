@@ -64,6 +64,10 @@
                     <input class="custom-file-input" type="file" id="chart-file">
                     <label class="custom-file-label" for="replay-file" id="chart-label">Chart File (Optional)</label>
                 </div>
+                <div class="custom-file mt-3">
+                    <input class="custom-file-input" type="file" id="fl-file">
+                    <label class="custom-file-label" for="fl-file" id="fl-label">FL Log File (Optional)</label>
+                </div>
                 <div class="row m-3 align-items-center">
                     <div class="col-6">
                         <div class="custom-control custom-checkbox">
@@ -127,6 +131,7 @@
                         <li>Click <b>Roadnet File</b> to upload the roadnet log file(*.json)</li>
                         <li>Click <b>Replay File</b> to upload the replay file(*.txt)</li>
                         <li>(Optional) Click <b>Chart File</b> to upload the chart log file</li>
+                        <li>(Optional) Click <b>FL Log File</b> to upload <code>fl_log.json</code> and watch the Federated Learning weight exchange</li>
                         <li>Press the <b>Start</b> button to start replaying the simulation!</li>
                         <li>To restart, just press <b>Start</b> again</li>
                         <li>(*) The <b>debug</b> option enables displaying the ID of vehicles, roads and intersections during a mouse hover.
@@ -151,6 +156,8 @@
 
                 </div>
             </div>
+            <!-- Bảng Federated Learning: chỉ hiện khi nạp FL Log File (fl_log.json) -->
+            <div id="fl-panel" class="d-none"></div>
             <div id="chart-container" class="h-25 m-0 border-top pt-2 pl-4 d-none" >
                 <div id="chart-title">Real-time Chart</div>
                 <div id="chart" class="ct-chart"></div>

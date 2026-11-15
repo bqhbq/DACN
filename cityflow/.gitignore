@@ -1,2 +1,4 @@
 src/generators/network_converter.py
 .build/
+# Dữ liệu mô phỏng sinh ra khi chạy (roadnet, flow, config, replay)
+sample/

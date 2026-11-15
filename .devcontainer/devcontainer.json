@@ -1,0 +1,24 @@
+// Dev Container cho FedMARL-ATSC: VS Code chạy bên trong container CityFlow.
+// Dùng lại đúng service trong cityflow/docker-compose.yml, không định nghĩa image riêng.
+{
+  "name": "FedMARL-ATSC (CityFlow)",
+  "dockerComposeFile": "../cityflow/docker-compose.yml",
+  "service": "cityflow",
+  "workspaceFolder": "/workspace",
+
+  // Đóng cửa sổ VS Code thì dừng container.
+  "shutdownAction": "stopCompose",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-toolsai.jupyter"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.terminal.activateEnvironment": false
+      }
+    }
+  }
+}
