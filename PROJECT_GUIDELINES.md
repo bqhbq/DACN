@@ -65,7 +65,7 @@ Dự án giải quyết bài toán Negative Transfer thông qua các cơ chế:
 |---|---|---|---|
 | 1 | **Fixed-time** | Chu kỳ đèn cố định, không phụ thuộc lưu lượng | `agents/baselines/fixed_time.py` |
 | 2 | **Actuated Control** | Điều chỉnh theo cảm biến vòng lặp (loop detector) | `agents/baselines/actuated.py` |
-| 3 | **Independent RL** | Mỗi giao lộ chạy PPO/DQN độc lập, không chia sẻ | `agents/dqn.py`, `agents/ppo.py` |
+| 3 | **Independent RL** | Mỗi giao lộ chạy một thuật toán RL độc lập (value-based hoặc policy-based), không chia sẻ | `agents/<rl_algo>.py` (mỗi thuật toán một module) |
 | 4 | **Centralized MARL** | Tất cả agent dùng chung một policy (shared weights) | `agents/shared_policy.py` |
 
 ---
@@ -100,8 +100,8 @@ Dự án hỗ trợ **hai dạng** không gian hành động, có thể cấu h�
 
 | Dạng | Mô tả | Ưu điểm |
 |---|---|---|
-| **Phase-based** | Agent chọn trực tiếp ID pha đèn tiếp theo | Đơn giản, phù hợp DQN |
-| **Keep/Change** | Agent quyết định giữ nguyên hoặc chuyển sang pha kế tiếp | Phù hợp PPO, kiểm soát tần suất chuyển pha |
+| **Phase-based** | Agent chọn trực tiếp ID pha đèn tiếp theo | Đơn giản, phù hợp các thuật toán RL value-based |
+| **Keep/Change** | Agent quyết định giữ nguyên hoặc chuyển sang pha kế tiếp | Phù hợp các thuật toán RL policy-based, kiểm soát tần suất chuyển pha |
 
 > [!WARNING]
 > Lớp `TrafficEnv` PHẢI chặn hoàn toàn các hành động không hợp lệ (chuyển pha không theo thứ tự, vi phạm thời gian xanh tối thiểu) trước khi truyền xuống CityFlow. Agent không được có cơ hội quan sát trạng thái hệ quả của hành động bất hợp lệ.
@@ -147,7 +147,7 @@ $$r_t = -\sum_{l \in \mathcal{L}} |q_l^{in}(t) - q_l^{out}(t)|$$
 **Phương án 2: Action Masking** (Nâng cao)
 - `TrafficEnv` trả về `action_mask: np.ndarray` cùng với `observation`.
 - Agent chỉ được phép lựa chọn trong tập hành động hợp lệ.
-- Phù hợp với PPO (sử dụng masked softmax).
+- Phù hợp với các thuật toán RL policy-based (sử dụng masked softmax).
 
 ---
 
@@ -313,7 +313,7 @@ class NodeAgent:
         """Forward qua cả hai sub-module."""
 
     def compute_loss(self, batch: dict) -> torch.Tensor:
-        """Tính RL loss (TD-error cho DQN, policy gradient cho PPO)."""
+        """Tính RL loss theo thuật toán RL được cấu hình (vd. TD-error với value-based, policy gradient với policy-based)."""
 
     def get_shared_weights(self) -> dict[str, torch.Tensor]:
         """
@@ -405,8 +405,7 @@ FedMARL-ATSC/                        ← Workspace root
 │   ├── node_agent.py                ← [CẦN TẠO] NodeAgent với Decoupled Architecture
 │   ├── networks.py                  ← [CẦN TẠO] TrafficAgentNet PyTorch module
 │   ├── replay_buffer.py             ← [CẦN TẠO] Experience replay
-│   ├── dqn.py                       ← [CẦN TẠO] DQN trainer
-│   ├── ppo.py                       ← [CẦN TẠO] PPO trainer
+│   ├── <rl_algo>.py                 ← RL trainer, mỗi thuật toán một module (hiện có: dqn.py)
 │   └── baselines/
 │       ├── fixed_time.py            ← [CẦN TẠO]
 │       └── actuated.py              ← [CẦN TẠO]
@@ -475,3 +474,7 @@ FedMARL-ATSC/                        ← Workspace root
 ---
 
 *Tài liệu này được tạo ngày 2026-11-07. Mọi thay đổi phải được ghi chú rõ ràng với ngày tháng và lý do.*
+
+**Nhật ký thay đổi**
+
+- **2026-11-15** — Thay các chỉ định hẹp "DQN"/"PPO" bằng thuật ngữ tổng quát "RL" (value-based / policy-based). Lý do: phạm vi đề tài là cơ chế RL-FedMARL (RL kết hợp Federated Learning), không gắn cứng với một thuật toán cụ thể.

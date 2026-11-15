@@ -90,13 +90,17 @@ get_reward()        get_shared_weights()──► [nhận backbone]
 agents/
   node_agent.py    → class NodeAgent
   networks.py      → class TrafficAgentNet
-  dqn.py           → class DQNTrainer
+  <rl_algo>.py     → RL trainer, mỗi thuật toán một module (hiện có: dqn.py → class DQNTrainer)
   replay_buffer.py → class ReplayBuffer
 env/
   cityflow_wrapper.py → class TrafficEnv
 federated/
   server.py        → class FederatedServer
 ```
+
+> **Lưu ý (RL-FedMARL):** Đề tài dùng RL kết hợp Federated Learning, không gắn với một thuật toán cụ thể.
+> `NodeAgent`, `TrafficAgentNet`, `TrafficEnv` và `FederatedServer` phải trung lập với thuật toán;
+> logic riêng của từng thuật toán RL chỉ nằm trong module trainer tương ứng.
 
 ### 4.2 Type Hinting
 ```python
@@ -233,4 +237,4 @@ from federated.server     import FederatedServer
 
 ---
 
-*Cập nhật lần cuối: 2026-11-07*
+*Cập nhật lần cuối: 2026-11-15 — tổng quát hoá thuật ngữ "DQN" thành "RL" / cơ chế RL-FedMARL.*

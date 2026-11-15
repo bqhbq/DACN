@@ -1,7 +1,7 @@
 # docs/MDP_SPEC.md
 # Đặc tả Mô hình Toán học RL — FedMARL-ATSC
 
-> **Phiên bản**: 1.0 · **Ngày**: 2026-11-07
+> **Phiên bản**: 1.1 · **Ngày**: 2026-11-15 (1.0: 2026-11-07)
 > Tài liệu này định nghĩa chính xác không gian trạng thái, hành động và hàm phần thưởng
 > cho mọi agent trong hệ thống. **Mọi implementation phải tuân thủ spec này.**
 
@@ -235,7 +235,7 @@ for episode in range(num_episodes):
         actions = {i: agent_i.select_action(obs_i) for i in intersections}
         obs', reward, ... = env.step(actions)
         buffer.push(obs, actions, reward, obs')
-        loss = dqn_trainer.update()     ← Local RL update
+        loss = rl_trainer.update()      ← Local RL update (thuật toán RL bất kỳ)
 
     if episode % FL_INTERVAL == 0:     ← FL round sau mỗi N episodes
         weights = [a.get_shared_weights() for a in agents]
@@ -249,7 +249,7 @@ $$w^* = \sum_{k=1}^{K} \frac{n_k}{\sum_j n_j} \cdot w_k^{\text{backbone}}$$
 
 Trong đó:
 - $K$: Số agents tham gia vòng FL
-- $n_k$: Số transition trong replay buffer của agent $k$ (ước lượng dataset size)
+- $n_k$: Số mẫu (transition) cục bộ mà agent $k$ đã dùng để huấn luyện (ước lượng dataset size)
 - $w_k^{\text{backbone}}$: Trọng số `shared_feature_extractor` của agent $k$
 
 ---

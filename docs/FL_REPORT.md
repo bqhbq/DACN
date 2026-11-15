@@ -157,4 +157,4 @@ Lần chạy này đủ để minh hoạ cơ chế FL, chưa đủ để kết l
 - **Chỉ số độ lệch là giá trị lớn nhất trên một phần tử.** Nó nhạy với một trọng số cá biệt; `delta_norm` (chuẩn L2) phản ánh toàn bộ backbone tốt hơn.
 - **State đang ở dạng rút gọn.** State 36 chiều chưa có pha hiện tại và thời gian đã trôi của pha như [MDP_SPEC.md](MDP_SPEC.md) mục 2.3 yêu cầu.
 
-Bước hợp lý kế tiếp là chạy dài hơn với DQN đầy đủ (`agents/dqn.py`), thêm một lần chạy không FL làm đối chứng, và thử trên lưới có giao lộ khác loại.
+Bước hợp lý kế tiếp là chạy dài hơn với DQN đầy đủ (`agents/dqn.py`), thêm một lần chạy không FL làm đối chứng, và thử trên lưới có giao lộ khác loại. (Hoặc 1 thuật toán khác)
