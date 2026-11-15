@@ -10,6 +10,8 @@ Tuân thủ PROJECT_GUIDELINES.md §6.3:
   ✅ Broadcast global weights về NodeAgent
 
 TUYỆT ĐỐI KHÔNG chứa: logic CityFlow, neural network, replay buffer.
+Server chỉ biết hai hàm của client: extract_weights() và load_global_weights()
+— nó không quan tâm client huấn luyện bằng thuật toán RL nào.
 TUYỆT ĐỐI KHÔNG import: cityflow, TrafficEnv.
 """
 from __future__ import annotations
@@ -33,7 +35,7 @@ class FederatedServer:
         1. Thu thập shared backbone weights từ tất cả clients đã đăng ký
         2. (Tuỳ chọn) Phân cụm clients theo metadata → tổng hợp theo cụm
         3. aggregate(FedAvg hoặc FedProx) → global_weights
-        4. broadcast() → NodeAgent.set_shared_weights()
+        4. broadcast() → NodeAgent.load_global_weights()
 
     Tham số
     -------
@@ -133,7 +135,7 @@ class FederatedServer:
         Gửi global_weights về tất cả clients đã đăng ký.
 
         Mỗi client nhận một deep-copy độc lập (không aliasing).
-        Client gọi NodeAgent.set_shared_weights() — chỉ backbone được cập nhật,
+        Client gọi NodeAgent.load_global_weights() — chỉ backbone được cập nhật,
         local_policy_head giữ nguyên (personalisation).
 
         Raises
@@ -144,7 +146,7 @@ class FederatedServer:
             raise RuntimeError("Chưa có global_weights. Gọi aggregate() trước broadcast().")
 
         for client in self.clients:
-            client.set_shared_weights(copy.deepcopy(self.global_weights))
+            client.load_global_weights(copy.deepcopy(self.global_weights))
 
         logger.info(
             "Round %d | broadcast() → %d clients", self._fl_round, len(self.clients)
@@ -256,7 +258,7 @@ class FederatedServer:
             clusters = self.cluster_clients()
             participants = max(clusters.values(), key=len)
             counts = None
-        weight_packets = [c.get_shared_weights() for c in participants]
+        weight_packets = [c.extract_weights() for c in participants]
         logger.info(
             "Round %d | Thu thập weights từ %d clients", self._fl_round, len(participants)
         )
