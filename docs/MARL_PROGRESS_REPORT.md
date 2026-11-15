@@ -100,16 +100,98 @@ một bộ thí nghiệm so sánh có thể lặp lại, và demo CityFlow dùng
 - **Người phụ trách CityFlow:** thống nhất bố cục state (`env/obs_layout.py`); cung cấp quan hệ kề giữa các giao lộ cho neighbor embedding;
   topology/lưu lượng không đồng nhất (generator đã hỗ trợ số làn/khoảng cách, `main_fedmarl.py` mới chỉ dùng `rows/cols`).
 
-## 8. Cách chạy lại
+## 8. Hướng dẫn chạy cho thành viên khác (đặc biệt người phụ trách FL)
+
+> **Lưu ý quan trọng:** demo CityFlow trên nhánh này **chưa từng chạy với CityFlow thật** (người viết không build được Docker).
+> Bản port chỉ mới được kiểm chứng với engine giả. Người chạy đầu tiên vì vậy là người thử nghiệm đầu tiên — nếu có lỗi,
+> hãy gửi lại toàn bộ thông báo lỗi để sửa tiếp trên cùng nhánh.
+> Bản port chỉ dùng lại đúng các lời gọi `engine.*` của demo cũ và không đổi phần sinh roadnet/flow, nên rủi ro được đánh giá là thấp.
+
+### 8.1 Lấy nhánh về
 
 ```bash
-python -m pytest tests -q                                   # 27 test, không cần CityFlow
-python train_fedmarl.py --hetero 1 --episodes 100 --tag het  # độc lập / FedAvg / FedProx + 2 baseline
-python train_fedmarl.py --hetero 0 --episodes 100 --tag hom
-python aggregate_results.py                                  # gộp nhiều seed
-
-# CityFlow thật (trong container, xem cityflow/docker-compose.yml)
-docker compose exec cityflow python main_fedmarl.py --trainer dqn --steps 200 --fl-interval 100
-docker compose exec cityflow python main_fedmarl.py --trainer dqn --no-fl           # đối chứng
-docker compose exec cityflow python main_fedmarl.py --trainer dqn --fedprox-mu 0.001
+git fetch origin
+git checkout marl/rl-frame
 ```
+
+### 8.2 Phần chạy không cần Docker / CityFlow (xác nhận nhanh môi trường và agent)
+
+Cần Python ≥ 3.10, `numpy`, `torch` (bản CPU) và `pytest`. **`torch` và `pytest` không có trong `requirements.txt`**
+(Dockerfile cài `torch` riêng; `pytest` chưa có ở đâu) nên cần cài tay:
+
+```bash
+pip install numpy pandas
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install pytest
+
+python -m pytest tests -q                                      # kỳ vọng: 27 passed
+python train_fedmarl.py --hetero 1 --episodes 100 --tag het    # independent / FedAvg / FedProx + 2 baseline (vài phút)
+python train_fedmarl.py --hetero 0 --episodes 100 --tag hom    # đối chứng: giao lộ giống nhau
+python aggregate_results.py                                    # gộp nhiều seed -> results/multiseed_summary.csv
+```
+
+Để thử `FederatedServer` mới của mình, chỉ cần thay `federated/server.py` rồi chạy lại hai lệnh `train_fedmarl.py` ở trên và
+so sánh `results/*_summary.csv`. Agent chỉ dùng ba hàm của server: `extract_weights()`, `load_global_weights()`, `metadata()`
+(chỉ khi bật phân cụm).
+
+### 8.3 Demo CityFlow thật (trong Docker, Python 3.10)
+
+```bash
+cd cityflow
+docker compose up -d --build        # lần đầu mất vài phút (build CityFlow từ source)
+
+# chạy thử nhanh (vài giây)
+docker compose exec cityflow python main_fedmarl.py --trainer dqn --steps 200 --fl-interval 100
+```
+
+**Kết quả đúng sẽ có:**
+- Các khối `[FL Round 1]`, `[FL Round 2]` với ba chặng UPLINK → AGGREGATE → DOWNLINK.
+- Dòng `local_policy_head giữ nguyên ✓` ở chặng DOWNLINK.
+- Độ lệch backbone `... → 0.000000` sau mỗi vòng.
+- Cuối buổi chạy: `Average travel time`, `Hàng đợi TB`, tỷ lệ `vi phạm/bị chặn`, và đường dẫn các file replay.
+
+**Các biến thể:**
+
+```bash
+# đầy đủ hơn
+docker compose exec cityflow python main_fedmarl.py --trainer dqn --steps 1800 --fl-interval 100
+
+# đối chứng không FL
+docker compose exec cityflow python main_fedmarl.py --trainer dqn --no-fl --steps 1800
+
+# FedProx phía client
+docker compose exec cityflow python main_fedmarl.py --trainer dqn --fedprox-mu 0.001 --steps 1800
+
+# lưới lớn hơn (2x2 giao lộ)
+docker compose exec cityflow python main_fedmarl.py --trainer dqn --rows 2 --cols 2 --steps 600
+
+# Q-learning một bước (agent đơn giản nhất); '--trainer llm' cần API key trong .env, KHÔNG dùng để thử lần đầu
+docker compose exec cityflow python main_fedmarl.py --trainer local --steps 200
+```
+
+Dừng container khi xong: `docker compose down`.
+
+### 8.4 Xem kết quả
+
+- KPI: `cityflow/sample/demo_fl/render/kpi.csv` (hàng đợi, số xe, reward TB, độ lệch backbone theo từng lần quyết định) và
+  khối `kpi_summary` trong `render/fl_log.json`.
+- Replay trên trình duyệt (chạy trên **host**, không phải trong container):
+
+```bash
+cd cityflow/frontend
+python -m http.server 8000      # mở http://localhost:8000
+```
+
+Nạp `replay_roadnet.json` và `replay.txt` từ `cityflow/sample/demo_fl/render/`; tuỳ chọn thêm `fl_chart.txt` và `fl_log.json`.
+Mỗi lần chạy **ghi đè** thư mục `cityflow/sample/demo_fl/`, nên hãy sao lưu `render/` nếu muốn giữ kết quả cũ.
+
+### 8.5 Sự cố thường gặp
+
+| Triệu chứng | Nguyên nhân / cách xử lý |
+|---|---|
+| `Read-only file system`, `Input/output error` khi build | Ổ chứa ổ đĩa ảo của Docker (mặc định ổ C:) đã đầy. Giải phóng ≥ 20 GB hoặc chuyển *Disk image location* của Docker Desktop sang ổ khác; rồi `docker builder prune -a -f` và `docker compose build --no-cache`. |
+| `dpkg-preconfigure: ... not found` khi build | Cache build đã hỏng do ổ đầy: `docker builder prune -a -f`, sau đó build lại với `--no-cache`. |
+| Container không thấy `main_fedmarl.py` / `/workspace` rỗng | Đường dẫn repo có ký tự không phải ASCII (ví dụ "Đ"): sao chép repo sang đường dẫn không dấu rồi chạy lại. |
+| `No module named pytest` / `torch` | Cài tay như mục 8.2 (hai gói này chưa nằm trong `requirements.txt`). |
+| `TypeError` / `AttributeError` khi tạo agent trong demo | Đang chạy nhầm `main_demo_fedmarl.py` (bản cũ, không còn khớp API `agents/`). Dùng `main_fedmarl.py`. |
+| Lỗi khác trong demo CityFlow | Gửi lại toàn bộ thông báo lỗi (kèm vài dòng log phía trên nó). |
